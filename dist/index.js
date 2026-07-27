@@ -127,7 +127,7 @@ function getAudioBuffer(url) {
     return new Promise((resolve, reject) => {
         const child = runYtDlp([
             "-f",
-            "ba[ext=m4a]/ba/b",
+            "bestaudio/best", // Fallback to any available audio stream
             "-o",
             "-",
             "--no-playlist",

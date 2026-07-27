@@ -153,7 +153,7 @@ function getAudioBuffer(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = runYtDlp([
       "-f",
-      "ba[ext=m4a]/ba/b",
+      "bestaudio/best", // Fallback to any available audio stream
       "-o",
       "-",
       "--no-playlist",
@@ -185,6 +185,7 @@ function getAudioBuffer(url: string): Promise<Buffer> {
     });
   });
 }
+
 
 /**
  * Uploads a file buffer to Top4Top file hosting service.
