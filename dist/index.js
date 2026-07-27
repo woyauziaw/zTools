@@ -3,6 +3,7 @@ import multer from "multer";
 import FormData from "form-data";
 import axios from "axios";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 const __filename = fileURLToPath(import.meta.url);
@@ -30,6 +31,41 @@ function getYtDlpPath() {
     return "yt-dlp";
 }
 /**
+ * Writes cookies from YTDLP_COOKIES_B64 env var to a temp file and returns its path.
+ * Falls back to bundled bin/cookies.txt if env var is not set.
+ * @returns Absolute path to cookies file, or null if unavailable.
+ */
+function getCookiesPath() {
+    const b64 = process.env.YTDLP_COOKIES_B64;
+    if (b64) {
+        const tmpPath = "/tmp/yt_cookies.txt";
+        try {
+            fs.writeFileSync(tmpPath, Buffer.from(b64, "base64").toString("utf-8"));
+            return tmpPath;
+        }
+        catch {
+            return null;
+        }
+    }
+    const bundled = path.join(__dirname, "..", "bin", "cookies.txt");
+    try {
+        fs.accessSync(bundled);
+        return bundled;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Spawns the yt-dlp binary with the given arguments, injecting cookies if available.
+ * @param args - Command line arguments for yt-dlp.
+ */
+function runYtDlp(args) {
+    const cookies = getCookiesPath();
+    const cookieArgs = cookies ? ["--cookies", cookies] : [];
+    return spawn(getYtDlpPath(), [...cookieArgs, ...args]);
+}
+/**
  * Extracts YouTube Video ID from various URL formats.
  * @param url - YouTube video URL string.
  * @returns Video ID string if valid, otherwise null.
@@ -37,13 +73,6 @@ function getYtDlpPath() {
 function extractVideoId(url) {
     const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/);
     return match ? match[1] : null;
-}
-/**
- * Spawns the yt-dlp binary with the given arguments.
- * @param args - Command line arguments for yt-dlp.
- */
-function runYtDlp(args) {
-    return spawn(getYtDlpPath(), args);
 }
 /**
  * Retrieves metadata for a given YouTube URL using yt-dlp.
@@ -198,9 +227,7 @@ app.post("/api/ytdl", async (req, res) => {
 app.post("/api/upload", upload.single("file"), async (req, res) => {
     try {
         if (!req.file) {
-            return res
-                .status(400)
-                .json({ error: "No file provided in the request." });
+            return res.status(400).json({ error: "No file provided in the request." });
         }
         const url = await uploadTop4Top(req.file.buffer, req.file.originalname);
         return res.status(200).json({ title: req.file.originalname, url });
