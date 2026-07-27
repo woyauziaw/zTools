@@ -29,28 +29,38 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 
 /**
  * Resolves the yt-dlp binary path.
- * Uses bundled binary in production (Vercel), falls back to system binary locally.
+ * Dynamically grants execution permissions (+x) on production (Vercel).
  */
 function getYtDlpPath(): string {
+  let binPath = "yt-dlp";
+
   if (process.env.NODE_ENV === "production") {
-    return path.join(__dirname, "..", "bin", "yt-dlp");
+    binPath = path.join(__dirname, "..", "bin", "yt-dlp");
+    try {
+      // Ensure Vercel serverless container has execution permissions
+      fs.chmodSync(binPath, "755");
+    } catch (err) {
+      console.warn("Failed to grant execute permission to yt-dlp binary:", err);
+    }
   }
-  return "yt-dlp";
+
+  return binPath;
 }
 
 /**
- * Writes cookies from YTDLP_COOKIES_B64 env var to a temp file and returns its path.
+ * Writes cookies from YTDLP_COOKIES_B64 env var to /tmp/yt_cookies.txt on demand.
  * Falls back to bundled bin/cookies.txt if env var is not set.
- * @returns Absolute path to cookies file, or null if unavailable.
  */
 function getCookiesPath(): string | null {
   const b64 = process.env.YTDLP_COOKIES_B64;
   if (b64) {
     const tmpPath = "/tmp/yt_cookies.txt";
     try {
-      fs.writeFileSync(tmpPath, Buffer.from(b64, "base64").toString("utf-8"));
+      const decoded = Buffer.from(b64.trim(), "base64").toString("utf-8");
+      fs.writeFileSync(tmpPath, decoded, { encoding: "utf-8" });
       return tmpPath;
-    } catch {
+    } catch (err) {
+      console.error("Failed to write cookies from env:", err);
       return null;
     }
   }
@@ -65,19 +75,25 @@ function getCookiesPath(): string | null {
 }
 
 /**
- * Spawns the yt-dlp binary with the given arguments, injecting cookies if available.
- * @param args - Command line arguments for yt-dlp.
+ * Spawns the yt-dlp binary with player client overrides to bypass YouTube bot blocks.
  */
 function runYtDlp(args: string[]) {
   const cookies = getCookiesPath();
   const cookieArgs = cookies ? ["--cookies", cookies] : [];
-  return spawn(getYtDlpPath(), [...cookieArgs, ...args]);
+
+  // Client overrides to avoid "Sign in to confirm you're not a bot" on datacenter IPs
+  const bypassArgs = [
+    "--extractor-args",
+    "youtube:player_client=ios,android",
+    "--user-agent",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+  ];
+
+  return spawn(getYtDlpPath(), [...cookieArgs, ...bypassArgs, ...args]);
 }
 
 /**
  * Extracts YouTube Video ID from various URL formats.
- * @param url - YouTube video URL string.
- * @returns Video ID string if valid, otherwise null.
  */
 function extractVideoId(url: string): string | null {
   const match = url.match(
@@ -88,8 +104,6 @@ function extractVideoId(url: string): string | null {
 
 /**
  * Retrieves metadata for a given YouTube URL using yt-dlp.
- * @param url - Full YouTube video URL.
- * @returns Promise resolving to the parsed metadata object.
  */
 function getYoutubeInfo(url: string): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -98,12 +112,22 @@ function getYoutubeInfo(url: string): Promise<any> {
     let output = "";
     let error = "";
 
-    child.stdout.on("data", (data) => { output += data.toString(); });
-    child.stderr.on("data", (data) => { error += data.toString(); });
+    child.stdout.on("data", (data) => {
+      output += data.toString();
+    });
+    child.stderr.on("data", (data) => {
+      error += data.toString();
+    });
+
+    child.on("error", (err) => {
+      reject(new Error(`Failed to execute yt-dlp binary: ${err.message}`));
+    });
 
     child.on("close", (code) => {
       if (code !== 0) {
-        return reject(new Error(error.trim() || "Failed to retrieve YouTube metadata."));
+        return reject(
+          new Error(error.trim() || "Failed to retrieve YouTube metadata.")
+        );
       }
       try {
         resolve(JSON.parse(output));
@@ -116,14 +140,14 @@ function getYoutubeInfo(url: string): Promise<any> {
 
 /**
  * Downloads the best audio stream for a given YouTube URL as a Buffer.
- * @param url - Full YouTube video URL.
- * @returns Promise resolving to the audio Buffer.
  */
 function getAudioBuffer(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = runYtDlp([
-      "-f", "bestaudio",
-      "-o", "-",
+      "-f",
+      "ba[ext=m4a]/ba/b",
+      "-o",
+      "-",
       "--no-playlist",
       "--no-warnings",
       url,
@@ -132,12 +156,22 @@ function getAudioBuffer(url: string): Promise<Buffer> {
     const chunks: Buffer[] = [];
     let error = "";
 
-    child.stdout.on("data", (chunk) => { chunks.push(Buffer.from(chunk)); });
-    child.stderr.on("data", (data) => { error += data.toString(); });
+    child.stdout.on("data", (chunk) => {
+      chunks.push(Buffer.from(chunk));
+    });
+    child.stderr.on("data", (data) => {
+      error += data.toString();
+    });
+
+    child.on("error", (err) => {
+      reject(new Error(`Failed to execute yt-dlp binary: ${err.message}`));
+    });
 
     child.on("close", (code) => {
       if (code !== 0) {
-        return reject(new Error(error.trim() || "Failed to download audio stream."));
+        return reject(
+          new Error(error.trim() || "Failed to download audio stream.")
+        );
       }
       resolve(Buffer.concat(chunks));
     });
@@ -146,9 +180,6 @@ function getAudioBuffer(url: string): Promise<Buffer> {
 
 /**
  * Uploads a file buffer to Top4Top file hosting service.
- * @param buffer - File content stored in a Buffer.
- * @param filename - Name of the file including extension.
- * @returns Promise resolving to the direct download URL.
  */
 async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> {
   const userAgent =
@@ -157,7 +188,8 @@ async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> 
   const initResponse = await axios.get("https://top4top.io/", {
     headers: {
       "User-Agent": userAgent,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
   });
 
@@ -232,7 +264,7 @@ app.get("/boombox", (_req: Request, res: Response) => {
   res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
 
-/** Temporary debug endpoint — remove after confirming cookies work */
+/** Debug endpoint to verify base64 cookie extraction in production */
 app.get("/api/debug-cookies", (_req: Request, res: Response) => {
   const b64 = process.env.YTDLP_COOKIES_B64;
 
@@ -241,7 +273,7 @@ app.get("/api/debug-cookies", (_req: Request, res: Response) => {
   }
 
   try {
-    const decoded = Buffer.from(b64, "base64").toString("utf-8");
+    const decoded = Buffer.from(b64.trim(), "base64").toString("utf-8");
     const tmpPath = "/tmp/yt_cookies.txt";
     fs.writeFileSync(tmpPath, decoded);
     const written = fs.readFileSync(tmpPath, "utf-8");
@@ -250,6 +282,7 @@ app.get("/api/debug-cookies", (_req: Request, res: Response) => {
       env_length: b64.length,
       decoded_lines: decoded.split("\n").length,
       first_line: decoded.split("\n")[0],
+      has_netscape_header: decoded.startsWith("# Netscape"),
       file_written: written.length > 0,
     });
   } catch (e: any) {
@@ -278,11 +311,13 @@ app.post("/api/ytdl", async (req: Request, res: Response) => {
     const info = await getYoutubeInfo(youtubeUrl);
     const audio = await getAudioBuffer(youtubeUrl);
 
-    const filename = info.title.replace(/[^a-zA-Z0-9]/g, "_") + ".mp3";
+    const safeTitle = (info.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
+    const filename = `${safeTitle}.mp3`;
     const urlResult = await uploadTop4Top(audio, filename);
 
     return res.status(200).json({ title: info.title, url: urlResult });
   } catch (error: any) {
+    console.error("YTDL Endpoint Error:", error);
     return res.status(500).json({
       error:
         error?.message ||
@@ -300,7 +335,9 @@ app.post(
   async (req: Request, res: Response) => {
     try {
       if (!req.file) {
-        return res.status(400).json({ error: "No file provided in the request." });
+        return res
+          .status(400)
+          .json({ error: "No file provided in the request." });
       }
 
       const url = await uploadTop4Top(req.file.buffer, req.file.originalname);
@@ -308,8 +345,7 @@ app.post(
       return res.status(200).json({ title: req.file.originalname, url });
     } catch (error: any) {
       return res.status(500).json({
-        error:
-          error?.message || "An error occurred while uploading the file.",
+        error: error?.message || "An error occurred while uploading the file.",
       });
     }
   }
