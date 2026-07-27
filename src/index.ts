@@ -4,7 +4,6 @@ import FormData from "form-data";
 import axios from "axios";
 import path from "path";
 import { fileURLToPath } from "url";
-import ytdl from "@distube/ytdl-core";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,10 +19,6 @@ const upload = multer({
   },
 });
 
-/**
- * Resolve views directory — works both locally (src/views) and in
- * Vercel's compiled output (dist/views, copied by vercel-build).
- */
 const viewsDir = path.join(__dirname, "views");
 app.set("views", viewsDir);
 app.set("view engine", "pug");
@@ -43,6 +38,72 @@ function extractVideoId(url: string): string | null {
 }
 
 /**
+ * Fetches a direct audio stream URL from cobalt.tools for a given YouTube URL.
+ * @param youtubeUrl - Full YouTube video URL.
+ * @returns Promise resolving to the audio stream URL and video title.
+ */
+async function getCobaltAudioUrl(
+  youtubeUrl: string
+): Promise<{ streamUrl: string; title: string }> {
+  const response = await axios.post(
+    "https://api.cobalt.tools/",
+    {
+      url: youtubeUrl,
+      downloadMode: "audio",
+      audioFormat: "mp3",
+      filenameStyle: "classic",
+    },
+    {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      timeout: 30000,
+    }
+  );
+
+  const data = response.data;
+
+  /** cobalt returns status "stream" or "redirect" with a direct url */
+  if (
+    (data.status === "stream" || data.status === "redirect" || data.status === "tunnel") &&
+    data.url
+  ) {
+    const title: string =
+      data.filename
+        ?.replace(/\.[^/.]+$/, "")
+        .replace(/_/g, " ") ?? "audio";
+
+    return { streamUrl: data.url, title };
+  }
+
+  if (data.status === "error") {
+    throw new Error(data.error?.code ?? "Cobalt API returned an error.");
+  }
+
+  throw new Error("Unexpected response from Cobalt API.");
+}
+
+/**
+ * Downloads audio bytes from a given direct URL into a Buffer.
+ * @param url - Direct audio stream URL.
+ * @returns Promise resolving to a Buffer containing the audio data.
+ */
+async function downloadToBuffer(url: string): Promise<Buffer> {
+  const response = await axios.get(url, {
+    responseType: "arraybuffer",
+    timeout: 120000,
+    maxContentLength: Infinity,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+  });
+
+  return Buffer.from(response.data);
+}
+
+/**
  * Uploads a file buffer to Top4Top file hosting service.
  * @param buffer - File content stored in a Buffer.
  * @param filename - Name of the file including extension.
@@ -55,7 +116,8 @@ async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> 
   const initResponse = await axios.get("https://top4top.io/", {
     headers: {
       "User-Agent": userAgent,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
   });
 
@@ -120,53 +182,18 @@ async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> 
   throw new Error("Top4Top failed to return a valid upload URL.");
 }
 
-/**
- * Downloads audio from a YouTube URL as a Buffer using ytdl-core.
- * @param videoUrl - Full YouTube video URL.
- * @returns Promise resolving to the audio Buffer and video title.
- */
-async function downloadYoutubeAudio(
-  videoUrl: string
-): Promise<{ buffer: Buffer; title: string }> {
-  const info = await ytdl.getInfo(videoUrl);
-  const title = info.videoDetails.title;
-
-  const audioFormat = ytdl.chooseFormat(info.formats, {
-    quality: "highestaudio",
-    filter: "audioonly",
-  });
-
-  const stream = ytdl.downloadFromInfo(info, { format: audioFormat });
-
-  const chunks: Buffer[] = [];
-
-  await new Promise<void>((resolve, reject) => {
-    stream.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
-    stream.on("end", resolve);
-    stream.on("error", reject);
-  });
-
-  return { buffer: Buffer.concat(chunks), title };
-}
-
 // Render Index (Dashboard)
 app.get("/", (_req: Request, res: Response) => {
-  res.render("index", {
-    title: "Home",
-    activePath: "/",
-  });
+  res.render("index", { title: "Home", activePath: "/" });
 });
 
 // Render Boombox
 app.get("/boombox", (_req: Request, res: Response) => {
-  res.render("boombox", {
-    title: "Boombox Converter",
-    activePath: "/boombox",
-  });
+  res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
 
 /**
- * Downloads audio from YouTube and re-uploads it to Top4Top.
+ * Fetches audio via Cobalt API, downloads it, then re-uploads to Top4Top.
  */
 app.post("/api/ytdl", async (req: Request, res: Response) => {
   try {
@@ -183,7 +210,9 @@ app.post("/api/ytdl", async (req: Request, res: Response) => {
     }
 
     const youtubeUrl = `https://youtube.com/watch?v=${id}`;
-    const { buffer, title } = await downloadYoutubeAudio(youtubeUrl);
+
+    const { streamUrl, title } = await getCobaltAudioUrl(youtubeUrl);
+    const buffer = await downloadToBuffer(streamUrl);
 
     const filename = title.replace(/[^a-zA-Z0-9]/g, "_") + ".mp3";
     const urlResult = await uploadTop4Top(buffer, filename);
