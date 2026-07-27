@@ -69,13 +69,12 @@ function getCookiesPath() {
     }
 }
 /**
- * Spawns yt-dlp with read-only cookie handling and client spoofing.
+ * Spawns the yt-dlp binary with client overrides to bypass YouTube bot blocks.
  */
 function runYtDlp(args) {
     const cookies = getCookiesPath();
-    // Passing --no-write-cookies prevents yt-dlp from attempting 
-    // to save updated cookies back to the filesystem on exit.
-    const cookieArgs = cookies ? ["--cookies", cookies, "--no-write-cookies"] : [];
+    // Simply pass the /tmp cookie path without invalid flags
+    const cookieArgs = cookies ? ["--cookies", cookies] : [];
     const bypassArgs = [
         "--extractor-args",
         "youtube:player_client=ios,android",
