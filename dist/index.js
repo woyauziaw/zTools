@@ -29,7 +29,6 @@ function getYtDlpPath() {
     if (process.env.NODE_ENV === "production") {
         binPath = path.join(__dirname, "..", "bin", "yt-dlp");
         try {
-            // Ensure Vercel serverless container has execution permissions
             fs.chmodSync(binPath, "755");
         }
         catch (err) {
@@ -39,9 +38,9 @@ function getYtDlpPath() {
     return binPath;
 }
 /**
- * Resolves the path to cookies.txt directly from the repository.
- * Checks bin/cookies.txt or root cookies.txt.
- * @returns Absolute path to cookies file, or null if unavailable.
+ * Copies cookies.txt to /tmp directory so yt-dlp can safely read/write to it
+ * without triggering 'Read-only file system' errors on Vercel.
+ * @returns Path to writable cookies file in /tmp, or null if missing.
  */
 function getCookiesPath() {
     const possiblePaths = [
@@ -49,17 +48,27 @@ function getCookiesPath() {
         path.join(__dirname, "bin", "cookies.txt"),
         path.join(__dirname, "..", "cookies.txt"),
     ];
-    for (const cookiePath of possiblePaths) {
-        try {
-            fs.accessSync(cookiePath, fs.constants.R_OK);
-            return cookiePath;
-        }
-        catch {
-            continue;
+    let srcPath = null;
+    for (const p of possiblePaths) {
+        if (fs.existsSync(p)) {
+            srcPath = p;
+            break;
         }
     }
-    console.warn("cookies.txt was not found in any expected directory.");
-    return null;
+    if (!srcPath) {
+        console.warn("cookies.txt was not found in any expected directory.");
+        return null;
+    }
+    const tmpCookiesPath = path.join("/tmp", "yt_cookies.txt");
+    try {
+        // Copy the repository cookies to /tmp where writes are permitted
+        fs.copyFileSync(srcPath, tmpCookiesPath);
+        return tmpCookiesPath;
+    }
+    catch (err) {
+        console.error("Failed to copy cookies to /tmp:", err);
+        return srcPath; // fallback
+    }
 }
 /**
  * Spawns the yt-dlp binary with player client overrides to bypass YouTube bot blocks.
