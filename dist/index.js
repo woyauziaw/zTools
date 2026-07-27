@@ -331,4 +331,24 @@ app.get("/api/version", async (_req, res) => {
         });
     });
 });
+app.get("/api/formats", async (_req, res) => {
+    const child = runYtDlp([
+        "-F",
+        "https://youtu.be/ltzYprV091c"
+    ]);
+    let out = "";
+    let err = "";
+    child.stdout.on("data", d => {
+        out += d.toString();
+    });
+    child.stderr.on("data", d => {
+        err += d.toString();
+    });
+    child.on("close", () => {
+        res.json({
+            stdout: out,
+            stderr: err
+        });
+    });
+});
 export default app;
