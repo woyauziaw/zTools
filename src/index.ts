@@ -3,6 +3,7 @@ import multer from "multer";
 import FormData from "form-data";
 import axios from "axios";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 
@@ -38,6 +39,42 @@ function getYtDlpPath(): string {
 }
 
 /**
+ * Writes cookies from YTDLP_COOKIES_B64 env var to a temp file and returns its path.
+ * Falls back to bundled bin/cookies.txt if env var is not set.
+ * @returns Absolute path to cookies file, or null if unavailable.
+ */
+function getCookiesPath(): string | null {
+  const b64 = process.env.YTDLP_COOKIES_B64;
+  if (b64) {
+    const tmpPath = "/tmp/yt_cookies.txt";
+    try {
+      fs.writeFileSync(tmpPath, Buffer.from(b64, "base64").toString("utf-8"));
+      return tmpPath;
+    } catch {
+      return null;
+    }
+  }
+
+  const bundled = path.join(__dirname, "..", "bin", "cookies.txt");
+  try {
+    fs.accessSync(bundled);
+    return bundled;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Spawns the yt-dlp binary with the given arguments, injecting cookies if available.
+ * @param args - Command line arguments for yt-dlp.
+ */
+function runYtDlp(args: string[]) {
+  const cookies = getCookiesPath();
+  const cookieArgs = cookies ? ["--cookies", cookies] : [];
+  return spawn(getYtDlpPath(), [...cookieArgs, ...args]);
+}
+
+/**
  * Extracts YouTube Video ID from various URL formats.
  * @param url - YouTube video URL string.
  * @returns Video ID string if valid, otherwise null.
@@ -47,14 +84,6 @@ function extractVideoId(url: string): string | null {
     /(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/
   );
   return match ? match[1] : null;
-}
-
-/**
- * Spawns the yt-dlp binary with the given arguments.
- * @param args - Command line arguments for yt-dlp.
- */
-function runYtDlp(args: string[]) {
-  return spawn(getYtDlpPath(), args);
 }
 
 /**
@@ -246,15 +275,10 @@ app.post(
   async (req: Request, res: Response) => {
     try {
       if (!req.file) {
-        return res
-          .status(400)
-          .json({ error: "No file provided in the request." });
+        return res.status(400).json({ error: "No file provided in the request." });
       }
 
-      const url = await uploadTop4Top(
-        req.file.buffer,
-        req.file.originalname
-      );
+      const url = await uploadTop4Top(req.file.buffer, req.file.originalname);
 
       return res.status(200).json({ title: req.file.originalname, url });
     } catch (error: any) {
