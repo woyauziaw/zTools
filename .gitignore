@@ -12,4 +12,4 @@ package-lock.json
 .DS_Store
 installer.js
 
-public/css/style.css
+# public/css/style.css
