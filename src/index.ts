@@ -92,11 +92,9 @@ function runYtDlp(args: string[]) {
   const cookies = getCookiesPath();
   const cookieArgs = cookies ? ["--cookies", cookies] : [];
 
+  // REMOVED: extractor-args and user-agent spoofing. 
+  // Let yt-dlp use its default clients to bypass blocks dynamically.
   const bypassArgs = [
-    "--extractor-args",
-    "youtube:player_client=android,web",
-    "--user-agent",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "--no-check-certificates",
   ];
 
@@ -162,7 +160,7 @@ function getAudioBuffer(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = runYtDlp([
       "-f",
-      "bestaudio/bestaudio[ext=m4a]/best",
+      "ba/b", // CHANGED: Simplified fallback string
       "-o",
       "-",
       "--no-playlist",
