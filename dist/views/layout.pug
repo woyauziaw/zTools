@@ -1,0 +1,131 @@
+doctype html
+html(lang="en")
+  head
+    meta(charset="UTF-8")
+    meta(name="viewport", content="width=device-width, initial-scale=1.0")
+    title zTools - #{title || 'Dashboard'}
+    link(rel="stylesheet", href="/css/style.css")
+    script.
+      // Mencegah flash tema saat halaman dimuat
+      if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+  body(class="bg-white dark:bg-[#0a0a0a] text-neutral-900 dark:text-neutral-100 min-h-screen flex flex-col selection:bg-neutral-800 selection:text-white transition-colors duration-200 font-sans")
+    
+    // Top Navbar (Vercel Style)
+    header(class="sticky top-0 z-50 backdrop-blur-md bg-white/80 dark:bg-[#0a0a0a]/80 border-b border-neutral-200 dark:border-neutral-800")
+      div(class="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between")
+        div(class="flex items-center gap-6")
+          a(href="/" class="flex items-center gap-2.5 font-bold tracking-tight text-base")
+            span(class="w-2.5 h-2.5 rounded-full bg-neutral-900 dark:bg-white inline-block")
+            span zTools
+          nav(class="hidden sm:flex items-center gap-5 text-sm text-neutral-500 dark:text-neutral-400 font-medium")
+            a(href="/" class="hover:text-neutral-900 dark:hover:text-white transition-colors" data-i18n="nav_home") Home
+            a(href="/boombox" class="hover:text-neutral-900 dark:hover:text-white transition-colors" data-i18n="nav_boombox") Boombox Converter
+        
+        div(class="flex items-center gap-2.5")
+          // Language Switcher Button
+          button#langToggle(class="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors uppercase" onclick="toggleLanguage()") EN
+          
+          // Theme Toggle Button
+          button#themeToggle(class="p-2 rounded-md border border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-900 transition-colors" onclick="toggleTheme()" aria-label="Toggle Theme")
+            // Sun Icon
+            svg(class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2")
+              path(stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z")
+            // Moon Icon
+            svg(class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2")
+              path(stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z")
+
+    // Main Content Area
+    main(class="flex-1 max-w-5xl w-full mx-auto px-6 py-12")
+      block content
+
+    // Footer
+    footer(class="border-t border-neutral-200 dark:border-neutral-800 py-6 text-center text-xs text-neutral-400 dark:text-neutral-500")
+      p &copy; zTools &mdash; Built for high performance.</p>
+
+    script.
+      // Sempurnakan Logika Toggle Tema
+      function toggleTheme() {
+        if (document.documentElement.classList.contains('dark')) {
+          document.documentElement.classList.remove('dark');
+          localStorage.setItem('theme', 'light');
+        } else {
+          document.documentElement.classList.add('dark');
+          localStorage.setItem('theme', 'dark');
+        }
+      }
+
+      // Sistem Terjemahan Bahasa (Inggris & Indonesia)
+      let currentLang = localStorage.getItem('lang') || 'en';
+
+      const translations = {
+        en: {
+          nav_home: "Home",
+          nav_boombox: "Boombox Converter",
+          home_title: "Developer Utilities & Tools",
+          home_desc: "A minimal, high-performance suite of automation tools built for modern web workflows.",
+          boombox_heading: "Boombox URL Converter",
+          boombox_sub: "Convert YouTube videos or local audio files into direct streaming links for GTA SA-MP Top4Top hosting.",
+          tab_yt: "YouTube URLs",
+          tab_file: "Local Files",
+          yt_label: "Enter YouTube URLs (1 to 10 links, one per line):",
+          file_label: "Select Audio Files (Max 10 files):",
+          btn_process_yt: "Process & Upload",
+          btn_process_file: "Upload to Top4Top",
+          loading_text: "Processing audio and uploading...",
+          table_source: "Source Name",
+          table_link: "Top4Top Link",
+          table_action: "Action",
+          back_to_home: "Back to Home",
+          drag_drop: "Click to upload or drag and drop",
+          file_limit: "MP3, WAV, M4A (Max 10 files, 15MB each)",
+          result_title: "Generated Links",
+        },
+        id: {
+          nav_home: "Beranda",
+          nav_boombox: "Konverter Boombox",
+          home_title: "Utilitas & Alat Pengembang",
+          home_desc: "Kumpulan alat otomatisasi minimalis dan performa tinggi yang dirancang untuk alur kerja modern.",
+          boombox_heading: "Konverter URL Boombox",
+          boombox_sub: "Konversi video YouTube atau file audio lokal menjadi tautan langsung untuk hosting GTA SA-MP Top4Top.",
+          tab_yt: "URL YouTube",
+          tab_file: "File Lokal",
+          yt_label: "Masukkan URL YouTube (1 hingga 10 tautan, satu per baris):",
+          file_label: "Pilih File Audio (Maksimal 10 file):",
+          btn_process_yt: "Proses & Unggah",
+          btn_process_file: "Unggah ke Top4Top",
+          loading_text: "Memproses audio dan mengunggah...",
+          table_source: "Nama Sumber",
+          table_link: "Tautan Top4Top",
+          table_action: "Aksi",
+          back_to_home: "Kembali ke Beranda",
+          drag_drop: "Klik untuk mengunggah atau seret dan lepas",
+          file_limit: "MP3, WAV, M4A (Maks 10 file, masing-masing 15MB)",
+          result_title: "Tautan Dihasilkan",
+        }
+      };
+
+      function updateLanguageUI() {
+        document.querySelectorAll('[data-i18n]').forEach(el => {
+          const key = el.getAttribute('data-i18n');
+          if (translations[currentLang][key]) {
+            el.textContent = translations[currentLang][key];
+          }
+        });
+        document.getElementById('langToggle').textContent = currentLang.toUpperCase();
+      }
+
+      function toggleLanguage() {
+        currentLang = currentLang === 'en' ? 'id' : 'en';
+        localStorage.setItem('lang', currentLang);
+        updateLanguageUI();
+      }
+
+      document.addEventListener('DOMContentLoaded', () => {
+        updateLanguageUI();
+      });
+
+  block scripts
