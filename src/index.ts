@@ -94,9 +94,10 @@ function runYtDlp(args: string[]) {
 
   const bypassArgs = [
     "--extractor-args",
-    "youtube:player_client=mweb,android,web",
+    "youtube:player_client=android,web",
     "--user-agent",
-    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "--no-check-certificates",
   ];
 
   return spawn(getYtDlpPath(), [...cookieArgs, ...bypassArgs, ...args]);
@@ -161,7 +162,7 @@ function getAudioBuffer(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = runYtDlp([
       "-f",
-      "bestaudio/best",
+      "bestaudio/bestaudio[ext=m4a]/best",
       "-o",
       "-",
       "--no-playlist",
