@@ -16,58 +16,41 @@ const upload = multer({
         fileSize: 15 * 1024 * 1024,
     },
 });
-const viewsDir = path.join(__dirname, "views");
-app.set("views", viewsDir);
+app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "pug");
 app.use(express.static(path.join(__dirname, "..", "public")));
 function getYtDlpPath() {
-    let binPath = "yt-dlp";
-    if (process.env.NODE_ENV === "production") {
-        binPath = path.join(__dirname, "..", "bin", "yt-dlp");
-        try {
-            fs.chmodSync(binPath, "755");
-        }
-        catch (err) {
-            console.warn("Failed to grant execute permission to yt-dlp binary:", err);
-        }
+    const binary = path.join(__dirname, "..", "bin", "yt-dlp");
+    if (!fs.existsSync(binary)) {
+        throw new Error("yt-dlp binary not found: " + binary);
     }
-    return binPath;
+    try {
+        fs.chmodSync(binary, 0o755);
+    }
+    catch { }
+    return binary;
 }
 function getCookiesPath() {
-    const possiblePaths = [
-        path.join(__dirname, "..", "bin", "cookies.txt"),
-        path.join(__dirname, "bin", "cookies.txt"),
-        path.join(__dirname, "..", "cookies.txt"),
-    ];
-    let srcPath = null;
-    for (const p of possiblePaths) {
-        if (fs.existsSync(p)) {
-            srcPath = p;
-            break;
-        }
-    }
-    if (!srcPath) {
+    const cookie = path.join(__dirname, "..", "bin", "cookies.txt");
+    if (!fs.existsSync(cookie)) {
         return null;
     }
-    const tmpCookiesPath = path.join("/tmp", "yt_cookies.txt");
-    try {
-        fs.copyFileSync(srcPath, tmpCookiesPath);
-        return tmpCookiesPath;
-    }
-    catch (err) {
-        return srcPath;
-    }
+    return cookie;
 }
 function runYtDlp(args) {
     const cookies = getCookiesPath();
-    const cookieArgs = cookies ? ["--cookies", cookies] : [];
-    // ULTIMATE BYPASS: Force iOS and TV clients. 
-    // Vercel IPs get blocked if they use the default 'web' client.
-    const bypassArgs = [
+    const finalArgs = [
         "--no-check-certificate",
-        "--extractor-args", "youtube:player_client=ios,tv"
+        "--no-playlist",
+        "--no-warnings",
     ];
-    return spawn(getYtDlpPath(), [...cookieArgs, ...bypassArgs, ...args]);
+    if (cookies) {
+        finalArgs.push("--cookies", cookies);
+    }
+    return spawn(getYtDlpPath(), [
+        ...finalArgs,
+        ...args
+    ]);
 }
 function extractVideoId(url) {
     const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/);
@@ -75,8 +58,10 @@ function extractVideoId(url) {
 }
 function getYoutubeInfo(url) {
     return new Promise((resolve, reject) => {
-        // No format restriction here, just get the raw metadata dump
-        const child = runYtDlp(["-j", "--no-playlist", "--no-warnings", url]);
+        const child = runYtDlp([
+            "-j",
+            url
+        ]);
         let output = "";
         let error = "";
         child.stdout.on("data", (data) => {
@@ -86,30 +71,31 @@ function getYoutubeInfo(url) {
             error += data.toString();
         });
         child.on("error", (err) => {
-            reject(new Error(`Failed to execute yt-dlp binary: ${err.message}`));
+            reject(new Error("yt-dlp execution failed: " + err.message));
         });
         child.on("close", (code) => {
             if (code !== 0) {
-                return reject(new Error(error.trim() || "Failed to retrieve YouTube metadata."));
+                return reject(new Error(error.trim() ||
+                    "Failed getting YouTube information"));
             }
             try {
-                resolve(JSON.parse(output));
+                const json = JSON.parse(output);
+                resolve(json);
             }
             catch {
-                reject(new Error("Invalid JSON output received from yt-dlp."));
+                reject(new Error("Invalid yt-dlp JSON response"));
             }
         });
     });
 }
-function getAudioBuffer(url) {
+function downloadAudio(url, format) {
     return new Promise((resolve, reject) => {
-        // Fall back to best overall file (b) if audio-only (ba) is stripped
         const child = runYtDlp([
-            "-f", "ba/b",
-            "-o", "-",
-            "--no-playlist",
-            "--no-warnings",
-            url,
+            "-f",
+            format,
+            "-o",
+            "-",
+            url
         ]);
         const chunks = [];
         let error = "";
@@ -120,137 +106,229 @@ function getAudioBuffer(url) {
             error += data.toString();
         });
         child.on("error", (err) => {
-            reject(new Error(`Failed to execute yt-dlp binary: ${err.message}`));
+            reject(new Error(err.message));
         });
         child.on("close", (code) => {
             if (code !== 0) {
-                return reject(new Error(error.trim() || "Failed to download audio stream."));
+                return reject(new Error(error.trim()));
             }
             resolve(Buffer.concat(chunks));
         });
     });
 }
-async function uploadTop4Top(buffer, filename) {
-    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+async function getAudioBuffer(url) {
+    const formats = [
+        {
+            format: "bestaudio/best",
+            ext: "webm"
+        },
+        {
+            format: "bestaudio*",
+            ext: "webm"
+        },
+        {
+            format: "best",
+            ext: "mp4"
+        }
+    ];
+    let lastError = "";
+    for (const item of formats) {
+        try {
+            console.log("Trying format:", item.format);
+            const buffer = await downloadAudio(url, item.format);
+            if (buffer.length > 0) {
+                return {
+                    buffer,
+                    ext: item.ext
+                };
+            }
+        }
+        catch (err) {
+            console.log("Format failed:", item.format, err.message);
+            lastError = err.message;
+        }
+    }
+    throw new Error(lastError ||
+        "All audio formats failed");
+}
+async function uploadTop4Top(buffer, filename, contentType = "application/octet-stream") {
+    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+        "AppleWebKit/537.36 Chrome/124 Safari/537.36";
     const initResponse = await axios.get("https://top4top.io/", {
         headers: {
             "User-Agent": userAgent,
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
+        timeout: 30000,
     });
-    const initHtml = initResponse.data;
+    const html = initResponse.data;
     const cookies = initResponse.headers["set-cookie"];
     const cookieHeader = cookies
-        ? cookies.map((c) => c.split(";")[0]).join("; ")
+        ? cookies
+            .map((c) => c.split(";")[0])
+            .join("; ")
         : "";
-    const sid = initHtml.match(/name="sid"\s+value="([^"]+)"/)?.[1];
+    const sid = html.match(/name="sid"\s+value="([^"]+)"/)?.[1];
     if (!sid) {
-        throw new Error("Unable to retrieve session ID from Top4Top.");
+        throw new Error("Top4Top session ID not found");
     }
     const form = new FormData();
     form.append("sid", sid);
     form.append("submitr", "[ رفع الملفات ]");
     form.append("file_0_", buffer, {
         filename,
-        contentType: "application/octet-stream",
+        contentType,
     });
-    const uploadResponse = await axios.post("https://top4top.io/index.php", form.getBuffer(), {
+    const response = await axios.post("https://top4top.io/index.php", form.getBuffer(), {
         headers: {
             ...form.getHeaders(),
             "User-Agent": userAgent,
-            Cookie: cookieHeader,
-            Referer: "https://top4top.io/",
-            Origin: "https://top4top.io",
+            "Cookie": cookieHeader,
+            "Referer": "https://top4top.io/",
         },
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
         timeout: 120000,
     });
-    const html = uploadResponse.data;
+    const result = response.data;
     const patterns = [
         /value="(https:\/\/[a-z0-9]+\.top4top\.io\/m_[^"]+)"/i,
         /value="(https:\/\/[a-z0-9]+\.top4top\.io\/p_[^"]+)"/i,
-        /https:\/\/[a-z0-9]+\.top4top\.io\/m_[a-zA-Z0-9_\-.]+/i,
-        /https:\/\/[a-z0-9]+\.top4top\.io\/p_[a-zA-Z0-9_\-.]+/i,
+        /(https:\/\/[a-z0-9]+\.top4top\.io\/m_[a-zA-Z0-9_\-.]+)/i,
+        /(https:\/\/[a-z0-9]+\.top4top\.io\/p_[a-zA-Z0-9_\-.]+)/i,
     ];
     for (const regex of patterns) {
-        const found = html.match(regex);
-        if (found) {
-            return found[1] || found[0];
+        const match = result.match(regex);
+        if (match) {
+            return (match[1] ||
+                match[0]);
         }
     }
-    const errMatch = html.match(/<div class="error">([^<]+)<\/div>/i);
-    if (errMatch) {
-        throw new Error(`Top4Top Error: ${errMatch[1]}`);
-    }
-    throw new Error("Top4Top failed to return a valid upload URL.");
+    throw new Error("Top4Top upload URL not found");
 }
 app.get("/", (_req, res) => {
-    res.render("index", { title: "Home", activePath: "/" });
+    res.render("index", {
+        title: "Home",
+        activePath: "/"
+    });
 });
+function debugFormats(url) {
+    return new Promise((resolve, reject) => {
+        const child = runYtDlp([
+            "-F",
+            url
+        ]);
+        let output = "";
+        let error = "";
+        child.stdout.on("data", (d) => {
+            output += d.toString();
+        });
+        child.stderr.on("data", (d) => {
+            error += d.toString();
+        });
+        child.on("close", (code) => {
+            if (code !== 0) {
+                reject(new Error(error));
+                return;
+            }
+            resolve(output);
+        });
+    });
+}
 app.get("/boombox", (_req, res) => {
-    res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
+    res.render("boombox", {
+        title: "Boombox Converter",
+        activePath: "/boombox"
+    });
 });
 app.get("/api/debug-cookies", (_req, res) => {
-    const cookiePath = getCookiesPath();
-    if (!cookiePath) {
-        return res.json({ status: "COOKIE_FILE_NOT_FOUND" });
-    }
-    try {
-        const content = fs.readFileSync(cookiePath, "utf-8");
-        const lines = content.split("\n");
+    const cookie = getCookiesPath();
+    if (!cookie) {
         return res.json({
-            status: "OK",
-            file_path: cookiePath,
-            total_lines: lines.length,
-            first_line: lines[0],
-            has_netscape_header: content.startsWith("# Netscape"),
+            status: "COOKIE_NOT_FOUND"
         });
     }
-    catch (e) {
-        return res.json({ status: "ERROR", message: e.message });
-    }
+    return res.json({
+        status: "OK",
+        path: cookie,
+        size: fs.statSync(cookie).size
+    });
 });
 app.post("/api/ytdl", async (req, res) => {
     try {
         const { url } = req.body;
         if (!url) {
-            return res.status(400).json({ error: "URL parameter is required." });
+            return res.status(400)
+                .json({
+                error: "URL required"
+            });
         }
         const id = extractVideoId(url);
         if (!id) {
-            return res.status(400).json({ error: "Invalid YouTube URL format." });
+            return res.status(400)
+                .json({
+                error: "Invalid YouTube URL"
+            });
         }
         const youtubeUrl = `https://youtube.com/watch?v=${id}`;
         const info = await getYoutubeInfo(youtubeUrl);
+        const formats = await debugFormats(youtubeUrl);
+        console.log(formats);
+        return res.json({
+            formats
+        });
         const audio = await getAudioBuffer(youtubeUrl);
-        const safeTitle = (info.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
-        const filename = `${safeTitle}.mp3`;
-        const urlResult = await uploadTop4Top(audio, filename);
-        return res.status(200).json({ title: info.title, url: urlResult });
+        const safeTitle = (info.title ||
+            "audio")
+            .replace(/[^a-zA-Z0-9]/g, "_");
+        const filename = `${safeTitle}.${audio.ext}`;
+        const uploaded = await uploadTop4Top(audio.buffer, filename);
+        return res.json({
+            title: info.title,
+            url: uploaded
+        });
     }
-    catch (error) {
-        console.error("YTDL Endpoint Error:", error);
-        return res.status(500).json({
-            error: error?.message ||
-                "An unexpected error occurred while processing the video.",
+    catch (err) {
+        console.error("YTDL ERROR:", err);
+        return res.status(500)
+            .json({
+            error: err.message ||
+                "Processing failed"
         });
     }
 });
 app.post("/api/upload", upload.single("file"), async (req, res) => {
     try {
         if (!req.file) {
-            return res
-                .status(400)
-                .json({ error: "No file provided in the request." });
+            return res.status(400)
+                .json({
+                error: "No file"
+            });
         }
-        const url = await uploadTop4Top(req.file.buffer, req.file.originalname);
-        return res.status(200).json({ title: req.file.originalname, url });
-    }
-    catch (error) {
-        return res.status(500).json({
-            error: error?.message || "An error occurred while uploading the file.",
+        const url = await uploadTop4Top(req.file.buffer, req.file.originalname, req.file.mimetype);
+        return res.json({
+            title: req.file.originalname,
+            url
         });
     }
+    catch (err) {
+        return res.status(500)
+            .json({
+            error: err.message
+        });
+    }
+});
+app.get("/api/version", async (_req, res) => {
+    const child = runYtDlp([
+        "--version"
+    ]);
+    let out = "";
+    child.stdout.on("data", d => {
+        out += d.toString();
+    });
+    child.on("close", () => {
+        res.json({
+            version: out
+        });
+    });
 });
 export default app;

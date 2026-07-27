@@ -21,305 +21,882 @@ const upload = multer({
   },
 });
 
-const viewsDir = path.join(__dirname, "views");
-app.set("views", viewsDir);
-app.set("view engine", "pug");
 
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.set(
+  "views",
+  path.join(__dirname, "views")
+);
+
+app.set(
+  "view engine",
+  "pug"
+);
+
+
+app.use(
+  express.static(
+    path.join(__dirname, "..", "public")
+  )
+);
+
+
 
 function getYtDlpPath(): string {
-  let binPath = "yt-dlp";
 
-  if (process.env.NODE_ENV === "production") {
-    binPath = path.join(__dirname, "..", "bin", "yt-dlp");
-    try {
-      fs.chmodSync(binPath, "755");
-    } catch (err) {
-      console.warn("Failed to grant execute permission to yt-dlp binary:", err);
-    }
+  const binary = path.join(
+    __dirname,
+    "..",
+    "bin",
+    "yt-dlp"
+  );
+
+  if (!fs.existsSync(binary)) {
+    throw new Error(
+      "yt-dlp binary not found: " + binary
+    );
   }
 
-  return binPath;
+
+  try {
+    fs.chmodSync(binary, 0o755);
+  } catch {}
+
+  return binary;
 }
+
 
 
 function getCookiesPath(): string | null {
-  const possiblePaths = [
-    path.join(__dirname, "..", "bin", "cookies.txt"),
-    path.join(__dirname, "bin", "cookies.txt"),
-    path.join(__dirname, "..", "cookies.txt"),
-  ];
 
-  let srcPath: string | null = null;
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      srcPath = p;
-      break;
-    }
-  }
+  const cookie = path.join(
+    __dirname,
+    "..",
+    "bin",
+    "cookies.txt"
+  );
 
-  if (!srcPath) {
+
+  if (!fs.existsSync(cookie)) {
     return null;
   }
 
-  const tmpCookiesPath = path.join("/tmp", "yt_cookies.txt");
 
-  try {
-    fs.copyFileSync(srcPath, tmpCookiesPath);
-    return tmpCookiesPath;
-  } catch (err) {
-    return srcPath;
-  }
+  return cookie;
 }
 
-function runYtDlp(args: string[]) {
-  const cookies = getCookiesPath();
-  const cookieArgs = cookies ? ["--cookies", cookies] : [];
 
-  // ULTIMATE BYPASS: Force iOS and TV clients. 
-  // Vercel IPs get blocked if they use the default 'web' client.
-  const bypassArgs = [
+
+function runYtDlp(args: string[]) {
+
+  const cookies = getCookiesPath();
+
+
+  const finalArgs = [
     "--no-check-certificate",
-    "--extractor-args", "youtube:player_client=ios,tv"
+    "--no-playlist",
+    "--no-warnings",
   ];
 
-  return spawn(getYtDlpPath(), [...cookieArgs, ...bypassArgs, ...args]);
+
+  if (cookies) {
+    finalArgs.push(
+      "--cookies",
+      cookies
+    );
+  }
+
+
+  return spawn(
+    getYtDlpPath(),
+    [
+      ...finalArgs,
+      ...args
+    ]
+  );
 }
 
 function extractVideoId(url: string): string | null {
   const match = url.match(
     /(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/
   );
+
   return match ? match[1] : null;
 }
 
+
+
 function getYoutubeInfo(url: string): Promise<any> {
+
   return new Promise((resolve, reject) => {
-    // No format restriction here, just get the raw metadata dump
-    const child = runYtDlp(["-j", "--no-playlist", "--no-warnings", url]);
+
+    const child = runYtDlp([
+      "-j",
+      url
+    ]);
+
 
     let output = "";
     let error = "";
 
-    child.stdout.on("data", (data) => {
-      output += data.toString();
-    });
-    child.stderr.on("data", (data) => {
-      error += data.toString();
-    });
 
-    child.on("error", (err) => {
-      reject(new Error(`Failed to execute yt-dlp binary: ${err.message}`));
-    });
+    child.stdout.on(
+      "data",
+      (data) => {
+        output += data.toString();
+      }
+    );
 
-    child.on("close", (code) => {
-      if (code !== 0) {
-        return reject(
-          new Error(error.trim() || "Failed to retrieve YouTube metadata.")
+
+    child.stderr.on(
+      "data",
+      (data) => {
+        error += data.toString();
+      }
+    );
+
+
+    child.on(
+      "error",
+      (err) => {
+        reject(
+          new Error(
+            "yt-dlp execution failed: " + err.message
+          )
         );
       }
-      try {
-        resolve(JSON.parse(output));
-      } catch {
-        reject(new Error("Invalid JSON output received from yt-dlp."));
+    );
+
+
+    child.on(
+      "close",
+      (code) => {
+
+        if (code !== 0) {
+
+          return reject(
+            new Error(
+              error.trim() ||
+              "Failed getting YouTube information"
+            )
+          );
+
+        }
+
+
+        try {
+
+          const json = JSON.parse(output);
+
+          resolve(json);
+
+        } catch {
+
+          reject(
+            new Error(
+              "Invalid yt-dlp JSON response"
+            )
+          );
+
+        }
+
       }
-    });
+    );
+
   });
+
 }
 
-function getAudioBuffer(url: string): Promise<Buffer> {
+
+
+
+
+function downloadAudio(
+  url: string,
+  format: string
+): Promise<Buffer> {
+
+
   return new Promise((resolve, reject) => {
-    // Fall back to best overall file (b) if audio-only (ba) is stripped
+
+
     const child = runYtDlp([
-      "-f", "ba/b",
-      "-o", "-",
-      "--no-playlist",
-      "--no-warnings",
-      url,
+
+      "-f",
+      format,
+
+      "-o",
+      "-",
+
+      url
+
     ]);
 
+
+
     const chunks: Buffer[] = [];
+
     let error = "";
 
-    child.stdout.on("data", (chunk) => {
-      chunks.push(Buffer.from(chunk));
-    });
-    child.stderr.on("data", (data) => {
-      error += data.toString();
-    });
 
-    child.on("error", (err) => {
-      reject(new Error(`Failed to execute yt-dlp binary: ${err.message}`));
-    });
 
-    child.on("close", (code) => {
-      if (code !== 0) {
-        return reject(
-          new Error(error.trim() || "Failed to download audio stream.")
+    child.stdout.on(
+      "data",
+      (chunk) => {
+
+        chunks.push(
+          Buffer.from(chunk)
         );
+
       }
-      resolve(Buffer.concat(chunks));
-    });
+    );
+
+
+
+    child.stderr.on(
+      "data",
+      (data) => {
+
+        error += data.toString();
+
+      }
+    );
+
+
+
+    child.on(
+      "error",
+      (err) => {
+
+        reject(
+          new Error(
+            err.message
+          )
+        );
+
+      }
+    );
+
+
+
+    child.on(
+      "close",
+      (code) => {
+
+
+        if (code !== 0) {
+
+          return reject(
+            new Error(
+              error.trim()
+            )
+          );
+
+        }
+
+
+
+        resolve(
+          Buffer.concat(chunks)
+        );
+
+
+      }
+    );
+
+
   });
+
 }
 
-async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> {
-  const userAgent =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-  const initResponse = await axios.get("https://top4top.io/", {
-    headers: {
-      "User-Agent": userAgent,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+
+
+
+async function getAudioBuffer(
+  url: string
+): Promise<{
+  buffer: Buffer;
+  ext: string;
+}> {
+
+
+  const formats = [
+
+    {
+      format: "bestaudio/best",
+      ext: "webm"
     },
-  });
 
-  const initHtml: string = initResponse.data;
-  const cookies = initResponse.headers["set-cookie"];
-  const cookieHeader = cookies
-    ? cookies.map((c: string) => c.split(";")[0]).join("; ")
-    : "";
+    {
+      format: "bestaudio*",
+      ext: "webm"
+    },
 
-  const sid = initHtml.match(/name="sid"\s+value="([^"]+)"/)?.[1];
+    {
+      format: "best",
+      ext: "mp4"
+    }
 
-  if (!sid) {
-    throw new Error("Unable to retrieve session ID from Top4Top.");
+  ];
+
+
+
+  let lastError = "";
+
+
+
+  for (const item of formats) {
+
+    try {
+
+
+      console.log(
+        "Trying format:",
+        item.format
+      );
+
+
+      const buffer =
+        await downloadAudio(
+          url,
+          item.format
+        );
+
+
+      if (buffer.length > 0) {
+
+        return {
+          buffer,
+          ext: item.ext
+        };
+
+      }
+
+
+    } catch (err: any) {
+
+
+      console.log(
+        "Format failed:",
+        item.format,
+        err.message
+      );
+
+
+      lastError = err.message;
+
+    }
+
   }
 
-  const form = new FormData();
-  form.append("sid", sid);
-  form.append("submitr", "[ رفع الملفات ]");
-  form.append("file_0_", buffer, {
-    filename,
-    contentType: "application/octet-stream",
-  });
 
-  const uploadResponse = await axios.post(
-    "https://top4top.io/index.php",
-    form.getBuffer(),
+
+  throw new Error(
+    lastError ||
+    "All audio formats failed"
+  );
+
+}
+
+async function uploadTop4Top(
+  buffer: Buffer,
+  filename: string,
+  contentType: string = "application/octet-stream"
+): Promise<string> {
+
+
+  const userAgent =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+    "AppleWebKit/537.36 Chrome/124 Safari/537.36";
+
+
+
+  const initResponse =
+    await axios.get(
+      "https://top4top.io/",
+      {
+        headers: {
+          "User-Agent": userAgent,
+        },
+        timeout: 30000,
+      }
+    );
+
+
+
+  const html: string =
+    initResponse.data;
+
+
+
+  const cookies =
+    initResponse.headers["set-cookie"];
+
+
+
+  const cookieHeader =
+    cookies
+      ? cookies
+          .map((c: string) => c.split(";")[0])
+          .join("; ")
+      : "";
+
+
+
+  const sid =
+    html.match(
+      /name="sid"\s+value="([^"]+)"/
+    )?.[1];
+
+
+
+  if (!sid) {
+
+    throw new Error(
+      "Top4Top session ID not found"
+    );
+
+  }
+
+
+
+  const form = new FormData();
+
+
+
+  form.append(
+    "sid",
+    sid
+  );
+
+
+  form.append(
+    "submitr",
+    "[ رفع الملفات ]"
+  );
+
+
+
+  form.append(
+    "file_0_",
+    buffer,
     {
-      headers: {
-        ...form.getHeaders(),
-        "User-Agent": userAgent,
-        Cookie: cookieHeader,
-        Referer: "https://top4top.io/",
-        Origin: "https://top4top.io",
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      timeout: 120000,
+      filename,
+      contentType,
     }
   );
 
-  const html: string = uploadResponse.data;
+
+
+  const response =
+    await axios.post(
+      "https://top4top.io/index.php",
+      form.getBuffer(),
+      {
+        headers: {
+
+          ...form.getHeaders(),
+
+          "User-Agent":
+            userAgent,
+
+          "Cookie":
+            cookieHeader,
+
+          "Referer":
+            "https://top4top.io/",
+
+        },
+
+
+        maxContentLength:
+          Infinity,
+
+        maxBodyLength:
+          Infinity,
+
+        timeout:
+          120000,
+
+      }
+    );
+
+
+
+  const result =
+    response.data;
+
+
 
   const patterns = [
+
     /value="(https:\/\/[a-z0-9]+\.top4top\.io\/m_[^"]+)"/i,
+
     /value="(https:\/\/[a-z0-9]+\.top4top\.io\/p_[^"]+)"/i,
-    /https:\/\/[a-z0-9]+\.top4top\.io\/m_[a-zA-Z0-9_\-.]+/i,
-    /https:\/\/[a-z0-9]+\.top4top\.io\/p_[a-zA-Z0-9_\-.]+/i,
+
+    /(https:\/\/[a-z0-9]+\.top4top\.io\/m_[a-zA-Z0-9_\-.]+)/i,
+
+    /(https:\/\/[a-z0-9]+\.top4top\.io\/p_[a-zA-Z0-9_\-.]+)/i,
+
   ];
 
+
+
   for (const regex of patterns) {
-    const found = html.match(regex);
-    if (found) {
-      return found[1] || found[0];
+
+    const match =
+      result.match(regex);
+
+
+    if (match) {
+
+      return (
+        match[1] ||
+        match[0]
+      );
+
     }
+
   }
 
-  const errMatch = html.match(/<div class="error">([^<]+)<\/div>/i);
-  if (errMatch) {
-    throw new Error(`Top4Top Error: ${errMatch[1]}`);
-  }
 
-  throw new Error("Top4Top failed to return a valid upload URL.");
+
+  throw new Error(
+    "Top4Top upload URL not found"
+  );
+
 }
 
-app.get("/", (_req: Request, res: Response) => {
-  res.render("index", { title: "Home", activePath: "/" });
-});
 
-app.get("/boombox", (_req: Request, res: Response) => {
-  res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
-});
 
-app.get("/api/debug-cookies", (_req: Request, res: Response) => {
-  const cookiePath = getCookiesPath();
 
-  if (!cookiePath) {
-    return res.json({ status: "COOKIE_FILE_NOT_FOUND" });
+
+app.get(
+  "/",
+  (_req: Request, res: Response) => {
+
+    res.render(
+      "index",
+      {
+        title: "Home",
+        activePath: "/"
+      }
+    );
+
   }
+);
 
-  try {
-    const content = fs.readFileSync(cookiePath, "utf-8");
-    const lines = content.split("\n");
+function debugFormats(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = runYtDlp([
+      "-F",
+      url
+    ]);
+
+    let output = "";
+    let error = "";
+
+    child.stdout.on("data", (d) => {
+      output += d.toString();
+    });
+
+    child.stderr.on("data", (d) => {
+      error += d.toString();
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(error));
+        return;
+      }
+
+      resolve(output);
+    });
+  });
+}
+
+
+
+app.get(
+  "/boombox",
+  (_req: Request, res: Response) => {
+
+    res.render(
+      "boombox",
+      {
+        title:
+          "Boombox Converter",
+        activePath:
+          "/boombox"
+      }
+    );
+
+  }
+);
+
+
+
+
+
+app.get(
+  "/api/debug-cookies",
+  (_req, res) => {
+
+    const cookie =
+      getCookiesPath();
+
+
+
+    if (!cookie) {
+
+      return res.json({
+        status:
+          "COOKIE_NOT_FOUND"
+      });
+
+    }
+
+
+
     return res.json({
-      status: "OK",
-      file_path: cookiePath,
-      total_lines: lines.length,
-      first_line: lines[0],
-      has_netscape_header: content.startsWith("# Netscape"),
+
+      status:
+        "OK",
+
+      path:
+        cookie,
+
+      size:
+        fs.statSync(cookie).size
+
     });
-  } catch (e: any) {
-    return res.json({ status: "ERROR", message: e.message });
+
   }
+);
+
+
+
+
+
+app.post(
+  "/api/ytdl",
+  async (
+    req: Request,
+    res: Response
+  ) => {
+
+
+    try {
+
+
+      const {
+        url
+      } = req.body;
+
+
+
+      if (!url) {
+
+        return res.status(400)
+          .json({
+            error:
+              "URL required"
+          });
+
+      }
+
+
+
+      const id =
+        extractVideoId(url);
+
+
+
+      if (!id) {
+
+        return res.status(400)
+          .json({
+            error:
+              "Invalid YouTube URL"
+          });
+
+      }
+
+
+
+      const youtubeUrl =
+        `https://youtube.com/watch?v=${id}`;
+
+
+
+      const info =
+        await getYoutubeInfo(
+          youtubeUrl
+        );
+
+const formats = await debugFormats(youtubeUrl);
+
+console.log(formats);
+
+return res.json({
+  formats
 });
 
-app.post("/api/ytdl", async (req: Request, res: Response) => {
-  try {
-    const { url } = req.body;
+      const audio =
+        await getAudioBuffer(
+          youtubeUrl
+        );
 
-    if (!url) {
-      return res.status(400).json({ error: "URL parameter is required." });
+
+
+      const safeTitle =
+        (
+          info.title ||
+          "audio"
+        )
+        .replace(
+          /[^a-zA-Z0-9]/g,
+          "_"
+        );
+
+
+
+      const filename =
+        `${safeTitle}.${audio.ext}`;
+
+
+
+      const uploaded =
+        await uploadTop4Top(
+          audio.buffer,
+          filename
+        );
+
+
+
+      return res.json({
+
+        title:
+          info.title,
+
+        url:
+          uploaded
+
+      });
+
+
+
+    } catch (err: any) {
+
+
+      console.error(
+        "YTDL ERROR:",
+        err
+      );
+
+
+
+      return res.status(500)
+        .json({
+
+          error:
+            err.message ||
+            "Processing failed"
+
+        });
+
+
     }
 
-    const id = extractVideoId(url);
 
-    if (!id) {
-      return res.status(400).json({ error: "Invalid YouTube URL format." });
-    }
-
-    const youtubeUrl = `https://youtube.com/watch?v=${id}`;
-    
-    const info = await getYoutubeInfo(youtubeUrl);
-    const audio = await getAudioBuffer(youtubeUrl);
-
-    const safeTitle = (info.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
-    const filename = `${safeTitle}.mp3`;
-    
-    const urlResult = await uploadTop4Top(audio, filename);
-
-    return res.status(200).json({ title: info.title, url: urlResult });
-  } catch (error: any) {
-    console.error("YTDL Endpoint Error:", error);
-    return res.status(500).json({
-      error:
-        error?.message ||
-        "An unexpected error occurred while processing the video.",
-    });
   }
-});
+);
+
+
+
+
 
 app.post(
   "/api/upload",
   upload.single("file"),
-  async (req: Request, res: Response) => {
+  async (
+    req: Request,
+    res: Response
+  ) => {
+
+
     try {
+
+
       if (!req.file) {
-        return res
-          .status(400)
-          .json({ error: "No file provided in the request." });
+
+        return res.status(400)
+          .json({
+            error:
+              "No file"
+          });
+
       }
 
-      const url = await uploadTop4Top(req.file.buffer, req.file.originalname);
 
-      return res.status(200).json({ title: req.file.originalname, url });
-    } catch (error: any) {
-      return res.status(500).json({
-        error: error?.message || "An error occurred while uploading the file.",
+
+      const url =
+        await uploadTop4Top(
+          req.file.buffer,
+          req.file.originalname,
+          req.file.mimetype
+        );
+
+
+
+      return res.json({
+
+        title:
+          req.file.originalname,
+
+        url
+
       });
+
+
+
+    } catch(err: any) {
+
+
+      return res.status(500)
+        .json({
+
+          error:
+            err.message
+
+        });
+
+
     }
+
   }
 );
+
+
+app.get("/api/version", async (_req,res)=>{
+
+ const child = runYtDlp([
+   "--version"
+ ]);
+
+ let out="";
+
+ child.stdout.on("data",d=>{
+   out+=d.toString();
+ });
+
+ child.on("close",()=>{
+   res.json({
+     version:out
+   });
+ });
+
+});
+
 
 export default app;
