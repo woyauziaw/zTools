@@ -20,10 +20,6 @@ const viewsDir = path.join(__dirname, "views");
 app.set("views", viewsDir);
 app.set("view engine", "pug");
 app.use(express.static(path.join(__dirname, "..", "public")));
-/**
- * Resolves the yt-dlp binary executable path.
- * Grants execute permission (+x) dynamically in production environments.
- */
 function getYtDlpPath() {
     let binPath = "yt-dlp";
     if (process.env.NODE_ENV === "production") {
@@ -37,9 +33,6 @@ function getYtDlpPath() {
     }
     return binPath;
 }
-/**
- * Copies cookies file to the temporary writable directory /tmp on Vercel.
- */
 function getCookiesPath() {
     const possiblePaths = [
         path.join(__dirname, "..", "bin", "cookies.txt"),
@@ -54,7 +47,6 @@ function getCookiesPath() {
         }
     }
     if (!srcPath) {
-        console.warn("cookies.txt was not found in any expected directory.");
         return null;
     }
     const tmpCookiesPath = path.join("/tmp", "yt_cookies.txt");
@@ -63,44 +55,28 @@ function getCookiesPath() {
         return tmpCookiesPath;
     }
     catch (err) {
-        console.error("Failed to copy cookies to /tmp:", err);
         return srcPath;
     }
 }
-/**
- * Spawns the yt-dlp process configured with cookie paths and user-agent overrides.
- */
 function runYtDlp(args) {
     const cookies = getCookiesPath();
     const cookieArgs = cookies ? ["--cookies", cookies] : [];
-    // FIXED: Flag is singular (--no-check-certificate). 
-    // Left out extractor-args to let yt-dlp handle IP blocks dynamically.
+    // ULTIMATE BYPASS: Force iOS and TV clients. 
+    // Vercel IPs get blocked if they use the default 'web' client.
     const bypassArgs = [
         "--no-check-certificate",
+        "--extractor-args", "youtube:player_client=ios,tv"
     ];
     return spawn(getYtDlpPath(), [...cookieArgs, ...bypassArgs, ...args]);
 }
-/**
- * Parses and extracts the unique 11-character YouTube video identifier.
- */
 function extractVideoId(url) {
     const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/);
     return match ? match[1] : null;
 }
-/**
- * Fetches JSON metadata for a specified YouTube video via yt-dlp execution.
- */
 function getYoutubeInfo(url) {
     return new Promise((resolve, reject) => {
-        // FIXED: Passed a foolproof format string to the JSON step so it doesn't 
-        // try to evaluate formats that require ffmpeg and crash early.
-        const child = runYtDlp([
-            "-j",
-            "-f", "140/bestaudio/best",
-            "--no-playlist",
-            "--no-warnings",
-            url
-        ]);
+        // No format restriction here, just get the raw metadata dump
+        const child = runYtDlp(["-j", "--no-playlist", "--no-warnings", url]);
         let output = "";
         let error = "";
         child.stdout.on("data", (data) => {
@@ -125,16 +101,11 @@ function getYoutubeInfo(url) {
         });
     });
 }
-/**
- * Downloads and buffers the best available audio stream for a YouTube video.
- */
 function getAudioBuffer(url) {
     return new Promise((resolve, reject) => {
-        // FIXED: Explicitly target format 140 (YouTube's standard standalone m4a audio).
-        // This format never requires ffmpeg to process. 
-        // If it fails, it cascades down to bestaudio, and then to best.
+        // Fall back to best overall file (b) if audio-only (ba) is stripped
         const child = runYtDlp([
-            "-f", "140/bestaudio/best",
+            "-f", "ba/b",
             "-o", "-",
             "--no-playlist",
             "--no-warnings",
@@ -159,9 +130,6 @@ function getAudioBuffer(url) {
         });
     });
 }
-/**
- * Submits a file buffer to Top4Top hosting services via multi-part form payloads.
- */
 async function uploadTop4Top(buffer, filename) {
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     const initResponse = await axios.get("https://top4top.io/", {
