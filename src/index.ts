@@ -42,6 +42,7 @@ function getYtDlpPath(): string {
   return binPath;
 }
 
+
 function getCookiesPath(): string | null {
   const possiblePaths = [
     path.join(__dirname, "..", "bin", "cookies.txt"),
