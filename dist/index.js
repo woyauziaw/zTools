@@ -38,9 +38,8 @@ function getYtDlpPath() {
     return binPath;
 }
 /**
- * Copies cookies.txt to /tmp directory so yt-dlp can safely read/write to it
- * without triggering 'Read-only file system' errors on Vercel.
- * @returns Path to writable cookies file in /tmp, or null if missing.
+ * Copies cookies.txt to /tmp directory so yt-dlp can access it.
+ * @returns Path to cookies file in /tmp, or null if missing.
  */
 function getCookiesPath() {
     const possiblePaths = [
@@ -61,22 +60,22 @@ function getCookiesPath() {
     }
     const tmpCookiesPath = path.join("/tmp", "yt_cookies.txt");
     try {
-        // Copy the repository cookies to /tmp where writes are permitted
         fs.copyFileSync(srcPath, tmpCookiesPath);
         return tmpCookiesPath;
     }
     catch (err) {
         console.error("Failed to copy cookies to /tmp:", err);
-        return srcPath; // fallback
+        return srcPath;
     }
 }
 /**
- * Spawns the yt-dlp binary with player client overrides to bypass YouTube bot blocks.
+ * Spawns yt-dlp with read-only cookie handling and client spoofing.
  */
 function runYtDlp(args) {
     const cookies = getCookiesPath();
-    const cookieArgs = cookies ? ["--cookies", cookies] : [];
-    // Client overrides to avoid "Sign in to confirm you're not a bot" on datacenter IPs
+    // Passing --no-write-cookies prevents yt-dlp from attempting 
+    // to save updated cookies back to the filesystem on exit.
+    const cookieArgs = cookies ? ["--cookies", cookies, "--no-write-cookies"] : [];
     const bypassArgs = [
         "--extractor-args",
         "youtube:player_client=ios,android",
