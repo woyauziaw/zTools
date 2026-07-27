@@ -5,7 +5,10 @@
       "src": "dist/index.js",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": ["dist/views/**"]
+        "includeFiles": [
+          "dist/views/**",
+          "bin/yt-dlp"
+        ]
       }
     },
     {

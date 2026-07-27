@@ -4,6 +4,7 @@ import FormData from "form-data";
 import axios from "axios";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
@@ -19,6 +20,16 @@ app.set("views", viewsDir);
 app.set("view engine", "pug");
 app.use(express.static(path.join(__dirname, "..", "public")));
 /**
+ * Resolves the yt-dlp binary path.
+ * Uses bundled binary in production (Vercel), falls back to system binary locally.
+ */
+function getYtDlpPath() {
+    if (process.env.NODE_ENV === "production") {
+        return path.join(__dirname, "..", "bin", "yt-dlp");
+    }
+    return "yt-dlp";
+}
+/**
  * Extracts YouTube Video ID from various URL formats.
  * @param url - YouTube video URL string.
  * @returns Video ID string if valid, otherwise null.
@@ -28,52 +39,62 @@ function extractVideoId(url) {
     return match ? match[1] : null;
 }
 /**
- * Fetches a direct audio stream URL from cobalt.tools for a given YouTube URL.
- * @param youtubeUrl - Full YouTube video URL.
- * @returns Promise resolving to the audio stream URL and video title.
+ * Spawns the yt-dlp binary with the given arguments.
+ * @param args - Command line arguments for yt-dlp.
  */
-async function getCobaltAudioUrl(youtubeUrl) {
-    const response = await axios.post("https://api.cobalt.tools/", {
-        url: youtubeUrl,
-        downloadMode: "audio",
-        audioFormat: "mp3",
-        filenameStyle: "classic",
-    }, {
-        headers: {
-            Accept: "application/json",
-            "Content-Type": "application/json",
-        },
-        timeout: 30000,
-    });
-    const data = response.data;
-    /** cobalt returns status "stream" or "redirect" with a direct url */
-    if ((data.status === "stream" || data.status === "redirect" || data.status === "tunnel") &&
-        data.url) {
-        const title = data.filename
-            ?.replace(/\.[^/.]+$/, "")
-            .replace(/_/g, " ") ?? "audio";
-        return { streamUrl: data.url, title };
-    }
-    if (data.status === "error") {
-        throw new Error(data.error?.code ?? "Cobalt API returned an error.");
-    }
-    throw new Error("Unexpected response from Cobalt API.");
+function runYtDlp(args) {
+    return spawn(getYtDlpPath(), args);
 }
 /**
- * Downloads audio bytes from a given direct URL into a Buffer.
- * @param url - Direct audio stream URL.
- * @returns Promise resolving to a Buffer containing the audio data.
+ * Retrieves metadata for a given YouTube URL using yt-dlp.
+ * @param url - Full YouTube video URL.
+ * @returns Promise resolving to the parsed metadata object.
  */
-async function downloadToBuffer(url) {
-    const response = await axios.get(url, {
-        responseType: "arraybuffer",
-        timeout: 120000,
-        maxContentLength: Infinity,
-        headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
+function getYoutubeInfo(url) {
+    return new Promise((resolve, reject) => {
+        const child = runYtDlp(["-j", "--no-playlist", "--no-warnings", url]);
+        let output = "";
+        let error = "";
+        child.stdout.on("data", (data) => { output += data.toString(); });
+        child.stderr.on("data", (data) => { error += data.toString(); });
+        child.on("close", (code) => {
+            if (code !== 0) {
+                return reject(new Error(error.trim() || "Failed to retrieve YouTube metadata."));
+            }
+            try {
+                resolve(JSON.parse(output));
+            }
+            catch {
+                reject(new Error("Invalid JSON output received from yt-dlp."));
+            }
+        });
     });
-    return Buffer.from(response.data);
+}
+/**
+ * Downloads the best audio stream for a given YouTube URL as a Buffer.
+ * @param url - Full YouTube video URL.
+ * @returns Promise resolving to the audio Buffer.
+ */
+function getAudioBuffer(url) {
+    return new Promise((resolve, reject) => {
+        const child = runYtDlp([
+            "-f", "bestaudio",
+            "-o", "-",
+            "--no-playlist",
+            "--no-warnings",
+            url,
+        ]);
+        const chunks = [];
+        let error = "";
+        child.stdout.on("data", (chunk) => { chunks.push(Buffer.from(chunk)); });
+        child.stderr.on("data", (data) => { error += data.toString(); });
+        child.on("close", (code) => {
+            if (code !== 0) {
+                return reject(new Error(error.trim() || "Failed to download audio stream."));
+            }
+            resolve(Buffer.concat(chunks));
+        });
+    });
 }
 /**
  * Uploads a file buffer to Top4Top file hosting service.
@@ -145,7 +166,7 @@ app.get("/boombox", (_req, res) => {
     res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
 /**
- * Fetches audio via Cobalt API, downloads it, then re-uploads to Top4Top.
+ * Downloads audio from YouTube and re-uploads it to Top4Top.
  */
 app.post("/api/ytdl", async (req, res) => {
     try {
@@ -158,11 +179,11 @@ app.post("/api/ytdl", async (req, res) => {
             return res.status(400).json({ error: "Invalid YouTube URL format." });
         }
         const youtubeUrl = `https://youtube.com/watch?v=${id}`;
-        const { streamUrl, title } = await getCobaltAudioUrl(youtubeUrl);
-        const buffer = await downloadToBuffer(streamUrl);
-        const filename = title.replace(/[^a-zA-Z0-9]/g, "_") + ".mp3";
-        const urlResult = await uploadTop4Top(buffer, filename);
-        return res.status(200).json({ title, url: urlResult });
+        const info = await getYoutubeInfo(youtubeUrl);
+        const audio = await getAudioBuffer(youtubeUrl);
+        const filename = info.title.replace(/[^a-zA-Z0-9]/g, "_") + ".mp3";
+        const urlResult = await uploadTop4Top(audio, filename);
+        return res.status(200).json({ title: info.title, url: urlResult });
     }
     catch (error) {
         return res.status(500).json({

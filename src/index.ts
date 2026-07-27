@@ -4,6 +4,7 @@ import FormData from "form-data";
 import axios from "axios";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +27,17 @@ app.set("view engine", "pug");
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 /**
+ * Resolves the yt-dlp binary path.
+ * Uses bundled binary in production (Vercel), falls back to system binary locally.
+ */
+function getYtDlpPath(): string {
+  if (process.env.NODE_ENV === "production") {
+    return path.join(__dirname, "..", "bin", "yt-dlp");
+  }
+  return "yt-dlp";
+}
+
+/**
  * Extracts YouTube Video ID from various URL formats.
  * @param url - YouTube video URL string.
  * @returns Video ID string if valid, otherwise null.
@@ -38,69 +50,69 @@ function extractVideoId(url: string): string | null {
 }
 
 /**
- * Fetches a direct audio stream URL from cobalt.tools for a given YouTube URL.
- * @param youtubeUrl - Full YouTube video URL.
- * @returns Promise resolving to the audio stream URL and video title.
+ * Spawns the yt-dlp binary with the given arguments.
+ * @param args - Command line arguments for yt-dlp.
  */
-async function getCobaltAudioUrl(
-  youtubeUrl: string
-): Promise<{ streamUrl: string; title: string }> {
-  const response = await axios.post(
-    "https://api.cobalt.tools/",
-    {
-      url: youtubeUrl,
-      downloadMode: "audio",
-      audioFormat: "mp3",
-      filenameStyle: "classic",
-    },
-    {
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      timeout: 30000,
-    }
-  );
-
-  const data = response.data;
-
-  /** cobalt returns status "stream" or "redirect" with a direct url */
-  if (
-    (data.status === "stream" || data.status === "redirect" || data.status === "tunnel") &&
-    data.url
-  ) {
-    const title: string =
-      data.filename
-        ?.replace(/\.[^/.]+$/, "")
-        .replace(/_/g, " ") ?? "audio";
-
-    return { streamUrl: data.url, title };
-  }
-
-  if (data.status === "error") {
-    throw new Error(data.error?.code ?? "Cobalt API returned an error.");
-  }
-
-  throw new Error("Unexpected response from Cobalt API.");
+function runYtDlp(args: string[]) {
+  return spawn(getYtDlpPath(), args);
 }
 
 /**
- * Downloads audio bytes from a given direct URL into a Buffer.
- * @param url - Direct audio stream URL.
- * @returns Promise resolving to a Buffer containing the audio data.
+ * Retrieves metadata for a given YouTube URL using yt-dlp.
+ * @param url - Full YouTube video URL.
+ * @returns Promise resolving to the parsed metadata object.
  */
-async function downloadToBuffer(url: string): Promise<Buffer> {
-  const response = await axios.get(url, {
-    responseType: "arraybuffer",
-    timeout: 120000,
-    maxContentLength: Infinity,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    },
-  });
+function getYoutubeInfo(url: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const child = runYtDlp(["-j", "--no-playlist", "--no-warnings", url]);
 
-  return Buffer.from(response.data);
+    let output = "";
+    let error = "";
+
+    child.stdout.on("data", (data) => { output += data.toString(); });
+    child.stderr.on("data", (data) => { error += data.toString(); });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        return reject(new Error(error.trim() || "Failed to retrieve YouTube metadata."));
+      }
+      try {
+        resolve(JSON.parse(output));
+      } catch {
+        reject(new Error("Invalid JSON output received from yt-dlp."));
+      }
+    });
+  });
+}
+
+/**
+ * Downloads the best audio stream for a given YouTube URL as a Buffer.
+ * @param url - Full YouTube video URL.
+ * @returns Promise resolving to the audio Buffer.
+ */
+function getAudioBuffer(url: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = runYtDlp([
+      "-f", "bestaudio",
+      "-o", "-",
+      "--no-playlist",
+      "--no-warnings",
+      url,
+    ]);
+
+    const chunks: Buffer[] = [];
+    let error = "";
+
+    child.stdout.on("data", (chunk) => { chunks.push(Buffer.from(chunk)); });
+    child.stderr.on("data", (data) => { error += data.toString(); });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        return reject(new Error(error.trim() || "Failed to download audio stream."));
+      }
+      resolve(Buffer.concat(chunks));
+    });
+  });
 }
 
 /**
@@ -116,8 +128,7 @@ async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> 
   const initResponse = await axios.get("https://top4top.io/", {
     headers: {
       "User-Agent": userAgent,
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
   });
 
@@ -193,7 +204,7 @@ app.get("/boombox", (_req: Request, res: Response) => {
 });
 
 /**
- * Fetches audio via Cobalt API, downloads it, then re-uploads to Top4Top.
+ * Downloads audio from YouTube and re-uploads it to Top4Top.
  */
 app.post("/api/ytdl", async (req: Request, res: Response) => {
   try {
@@ -210,14 +221,13 @@ app.post("/api/ytdl", async (req: Request, res: Response) => {
     }
 
     const youtubeUrl = `https://youtube.com/watch?v=${id}`;
+    const info = await getYoutubeInfo(youtubeUrl);
+    const audio = await getAudioBuffer(youtubeUrl);
 
-    const { streamUrl, title } = await getCobaltAudioUrl(youtubeUrl);
-    const buffer = await downloadToBuffer(streamUrl);
+    const filename = info.title.replace(/[^a-zA-Z0-9]/g, "_") + ".mp3";
+    const urlResult = await uploadTop4Top(audio, filename);
 
-    const filename = title.replace(/[^a-zA-Z0-9]/g, "_") + ".mp3";
-    const urlResult = await uploadTop4Top(buffer, filename);
-
-    return res.status(200).json({ title, url: urlResult });
+    return res.status(200).json({ title: info.title, url: urlResult });
   } catch (error: any) {
     return res.status(500).json({
       error:
