@@ -31,11 +31,18 @@ function getYtDlpPath() {
     return binary;
 }
 function getCookiesPath() {
-    const cookie = path.join(__dirname, "..", "bin", "cookies.txt");
-    if (!fs.existsSync(cookie)) {
+    const source = path.join(__dirname, "..", "bin", "cookies.txt");
+    if (!fs.existsSync(source)) {
         return null;
     }
-    return cookie;
+    const temp = "/tmp/cookies.txt";
+    try {
+        fs.copyFileSync(source, temp);
+        return temp;
+    }
+    catch {
+        return source;
+    }
 }
 function runYtDlp(args) {
     const cookies = getCookiesPath();
@@ -43,6 +50,9 @@ function runYtDlp(args) {
         "--no-check-certificate",
         "--no-playlist",
         "--no-warnings",
+        "--extractor-args",
+        "youtube:player_client=android",
+        "--force-ipv4"
     ];
     if (cookies) {
         finalArgs.push("--cookies", cookies);

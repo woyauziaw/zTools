@@ -67,21 +67,25 @@ function getYtDlpPath(): string {
 
 
 function getCookiesPath(): string | null {
-
-  const cookie = path.join(
+  const source = path.join(
     __dirname,
     "..",
     "bin",
     "cookies.txt"
   );
 
-
-  if (!fs.existsSync(cookie)) {
+  if (!fs.existsSync(source)) {
     return null;
   }
 
+  const temp = "/tmp/cookies.txt";
 
-  return cookie;
+  try {
+    fs.copyFileSync(source, temp);
+    return temp;
+  } catch {
+    return source;
+  }
 }
 
 
@@ -92,10 +96,15 @@ function runYtDlp(args: string[]) {
 
 
   const finalArgs = [
-    "--no-check-certificate",
-    "--no-playlist",
-    "--no-warnings",
-  ];
+  "--no-check-certificate",
+  "--no-playlist",
+  "--no-warnings",
+
+  "--extractor-args",
+  "youtube:player_client=android",
+
+  "--force-ipv4"
+];
 
 
   if (cookies) {
