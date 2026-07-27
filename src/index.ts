@@ -91,21 +91,21 @@ function getCookiesPath(): string | null {
 
 
 function runYtDlp(args: string[]) {
-
   const cookies = getCookiesPath();
 
-
-  const finalArgs = [
+const finalArgs = [
   "--no-check-certificate",
   "--no-playlist",
   "--no-warnings",
 
   "--extractor-args",
-  "youtube:player_client=android",
+  "youtube:player_client=android,web",
 
-  "--force-ipv4"
+  "--user-agent",
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36",
+
+  "--force-ipv4",
 ];
-
 
   if (cookies) {
     finalArgs.push(
@@ -113,7 +113,6 @@ function runYtDlp(args: string[]) {
       cookies
     );
   }
-
 
   return spawn(
     getYtDlpPath(),
@@ -123,7 +122,6 @@ function runYtDlp(args: string[]) {
     ]
   );
 }
-
 function extractVideoId(url: string): string | null {
   const match = url.match(
     /(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/

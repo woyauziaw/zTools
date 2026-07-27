@@ -51,8 +51,10 @@ function runYtDlp(args) {
         "--no-playlist",
         "--no-warnings",
         "--extractor-args",
-        "youtube:player_client=android",
-        "--force-ipv4"
+        "youtube:player_client=android,web",
+        "--user-agent",
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36",
+        "--force-ipv4",
     ];
     if (cookies) {
         finalArgs.push("--cookies", cookies);
