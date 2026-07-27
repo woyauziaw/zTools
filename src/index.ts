@@ -48,30 +48,28 @@ function getYtDlpPath(): string {
 }
 
 /**
- * Writes cookies from YTDLP_COOKIES_B64 env var to /tmp/yt_cookies.txt on demand.
- * Falls back to bundled bin/cookies.txt if env var is not set.
+ * Resolves the path to cookies.txt directly from the repository.
+ * Checks bin/cookies.txt or root cookies.txt.
+ * @returns Absolute path to cookies file, or null if unavailable.
  */
 function getCookiesPath(): string | null {
-  const b64 = process.env.YTDLP_COOKIES_B64;
-  if (b64) {
-    const tmpPath = "/tmp/yt_cookies.txt";
+  const possiblePaths = [
+    path.join(__dirname, "..", "bin", "cookies.txt"),
+    path.join(__dirname, "bin", "cookies.txt"),
+    path.join(__dirname, "..", "cookies.txt"),
+  ];
+
+  for (const cookiePath of possiblePaths) {
     try {
-      const decoded = Buffer.from(b64.trim(), "base64").toString("utf-8");
-      fs.writeFileSync(tmpPath, decoded, { encoding: "utf-8" });
-      return tmpPath;
-    } catch (err) {
-      console.error("Failed to write cookies from env:", err);
-      return null;
+      fs.accessSync(cookiePath, fs.constants.R_OK);
+      return cookiePath;
+    } catch {
+      continue;
     }
   }
 
-  const bundled = path.join(__dirname, "..", "bin", "cookies.txt");
-  try {
-    fs.accessSync(bundled);
-    return bundled;
-  } catch {
-    return null;
-  }
+  console.warn("cookies.txt was not found in any expected directory.");
+  return null;
 }
 
 /**
@@ -264,26 +262,23 @@ app.get("/boombox", (_req: Request, res: Response) => {
   res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
 
-/** Debug endpoint to verify base64 cookie extraction in production */
+/** Debug endpoint to verify repo cookies.txt file access in production */
 app.get("/api/debug-cookies", (_req: Request, res: Response) => {
-  const b64 = process.env.YTDLP_COOKIES_B64;
+  const cookiePath = getCookiesPath();
 
-  if (!b64) {
-    return res.json({ status: "NO_ENV_VAR" });
+  if (!cookiePath) {
+    return res.json({ status: "COOKIE_FILE_NOT_FOUND" });
   }
 
   try {
-    const decoded = Buffer.from(b64.trim(), "base64").toString("utf-8");
-    const tmpPath = "/tmp/yt_cookies.txt";
-    fs.writeFileSync(tmpPath, decoded);
-    const written = fs.readFileSync(tmpPath, "utf-8");
+    const content = fs.readFileSync(cookiePath, "utf-8");
+    const lines = content.split("\n");
     return res.json({
       status: "OK",
-      env_length: b64.length,
-      decoded_lines: decoded.split("\n").length,
-      first_line: decoded.split("\n")[0],
-      has_netscape_header: decoded.startsWith("# Netscape"),
-      file_written: written.length > 0,
+      file_path: cookiePath,
+      total_lines: lines.length,
+      first_line: lines[0],
+      has_netscape_header: content.startsWith("# Netscape"),
     });
   } catch (e: any) {
     return res.json({ status: "ERROR", message: e.message });
