@@ -232,6 +232,31 @@ app.get("/boombox", (_req: Request, res: Response) => {
   res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
 
+/** Temporary debug endpoint — remove after confirming cookies work */
+app.get("/api/debug-cookies", (_req: Request, res: Response) => {
+  const b64 = process.env.YTDLP_COOKIES_B64;
+
+  if (!b64) {
+    return res.json({ status: "NO_ENV_VAR" });
+  }
+
+  try {
+    const decoded = Buffer.from(b64, "base64").toString("utf-8");
+    const tmpPath = "/tmp/yt_cookies.txt";
+    fs.writeFileSync(tmpPath, decoded);
+    const written = fs.readFileSync(tmpPath, "utf-8");
+    return res.json({
+      status: "OK",
+      env_length: b64.length,
+      decoded_lines: decoded.split("\n").length,
+      first_line: decoded.split("\n")[0],
+      file_written: written.length > 0,
+    });
+  } catch (e: any) {
+    return res.json({ status: "ERROR", message: e.message });
+  }
+});
+
 /**
  * Downloads audio from YouTube and re-uploads it to Top4Top.
  */
