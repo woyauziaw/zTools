@@ -23,7 +23,6 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 /**
  * Resolves the yt-dlp binary executable path.
  * Grants execute permission (+x) dynamically in production environments.
- * @returns Path string to the yt-dlp binary executable.
  */
 function getYtDlpPath() {
     let binPath = "yt-dlp";
@@ -40,8 +39,6 @@ function getYtDlpPath() {
 }
 /**
  * Copies cookies file to the temporary writable directory /tmp on Vercel.
- * Prevents Read-only file system errors when yt-dlp attempts cookie operations.
- * @returns Path string to writable cookies file in /tmp, or null if source cookie file is missing.
  */
 function getCookiesPath() {
     const possiblePaths = [
@@ -72,23 +69,19 @@ function getCookiesPath() {
 }
 /**
  * Spawns the yt-dlp process configured with cookie paths and user-agent overrides.
- * @param args Array of command-line arguments to pass to yt-dlp.
- * @returns ChildProcess instance running yt-dlp.
  */
 function runYtDlp(args) {
     const cookies = getCookiesPath();
     const cookieArgs = cookies ? ["--cookies", cookies] : [];
-    // REMOVED: extractor-args and user-agent spoofing. 
-    // Let yt-dlp use its default clients to bypass blocks dynamically.
+    // FIXED: Flag is singular (--no-check-certificate). 
+    // Left out extractor-args to let yt-dlp handle IP blocks dynamically.
     const bypassArgs = [
-        "--no-check-certificates",
+        "--no-check-certificate",
     ];
     return spawn(getYtDlpPath(), [...cookieArgs, ...bypassArgs, ...args]);
 }
 /**
- * Parses and extracts the unique 11-character YouTube video identifier from standard or shortened URLs.
- * @param url YouTube video link or share URL string.
- * @returns The 11-character video ID string, or null if no match is found.
+ * Parses and extracts the unique 11-character YouTube video identifier.
  */
 function extractVideoId(url) {
     const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/);
@@ -96,12 +89,18 @@ function extractVideoId(url) {
 }
 /**
  * Fetches JSON metadata for a specified YouTube video via yt-dlp execution.
- * @param url Full target YouTube video URL string.
- * @returns Promise resolving to the parsed metadata object for the video.
  */
 function getYoutubeInfo(url) {
     return new Promise((resolve, reject) => {
-        const child = runYtDlp(["-j", "--no-playlist", "--no-warnings", url]);
+        // FIXED: Passed a foolproof format string to the JSON step so it doesn't 
+        // try to evaluate formats that require ffmpeg and crash early.
+        const child = runYtDlp([
+            "-j",
+            "-f", "140/bestaudio/best",
+            "--no-playlist",
+            "--no-warnings",
+            url
+        ]);
         let output = "";
         let error = "";
         child.stdout.on("data", (data) => {
@@ -128,16 +127,15 @@ function getYoutubeInfo(url) {
 }
 /**
  * Downloads and buffers the best available audio stream for a YouTube video.
- * @param url Full target YouTube video URL string.
- * @returns Promise resolving to a Buffer containing raw audio data.
  */
 function getAudioBuffer(url) {
     return new Promise((resolve, reject) => {
+        // FIXED: Explicitly target format 140 (YouTube's standard standalone m4a audio).
+        // This format never requires ffmpeg to process. 
+        // If it fails, it cascades down to bestaudio, and then to best.
         const child = runYtDlp([
-            "-f",
-            "ba/b", // CHANGED: Simplified fallback string
-            "-o",
-            "-",
+            "-f", "140/bestaudio/best",
+            "-o", "-",
             "--no-playlist",
             "--no-warnings",
             url,
@@ -163,9 +161,6 @@ function getAudioBuffer(url) {
 }
 /**
  * Submits a file buffer to Top4Top hosting services via multi-part form payloads.
- * @param buffer Raw binary buffer of the target file.
- * @param filename File name string to save on remote host.
- * @returns Promise resolving to the generated file hosting URL string.
  */
 async function uploadTop4Top(buffer, filename) {
     const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -222,21 +217,12 @@ async function uploadTop4Top(buffer, filename) {
     }
     throw new Error("Top4Top failed to return a valid upload URL.");
 }
-/**
- * Route handler rendering dashboard views.
- */
 app.get("/", (_req, res) => {
     res.render("index", { title: "Home", activePath: "/" });
 });
-/**
- * Route handler rendering converter views.
- */
 app.get("/boombox", (_req, res) => {
     res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
-/**
- * Diagnostic route inspecting existing deployment environment cookies.
- */
 app.get("/api/debug-cookies", (_req, res) => {
     const cookiePath = getCookiesPath();
     if (!cookiePath) {
@@ -257,9 +243,6 @@ app.get("/api/debug-cookies", (_req, res) => {
         return res.json({ status: "ERROR", message: e.message });
     }
 });
-/**
- * Process POST request to download YouTube video stream audio and upload resulting artifact to Top4Top.
- */
 app.post("/api/ytdl", async (req, res) => {
     try {
         const { url } = req.body;
@@ -286,9 +269,6 @@ app.post("/api/ytdl", async (req, res) => {
         });
     }
 });
-/**
- * Process POST request containing direct client upload file payloads for Top4Top re-hosting.
- */
 app.post("/api/upload", upload.single("file"), async (req, res) => {
     try {
         if (!req.file) {

@@ -30,7 +30,6 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 /**
  * Resolves the yt-dlp binary executable path.
  * Grants execute permission (+x) dynamically in production environments.
- * @returns Path string to the yt-dlp binary executable.
  */
 function getYtDlpPath(): string {
   let binPath = "yt-dlp";
@@ -49,8 +48,6 @@ function getYtDlpPath(): string {
 
 /**
  * Copies cookies file to the temporary writable directory /tmp on Vercel.
- * Prevents Read-only file system errors when yt-dlp attempts cookie operations.
- * @returns Path string to writable cookies file in /tmp, or null if source cookie file is missing.
  */
 function getCookiesPath(): string | null {
   const possiblePaths = [
@@ -85,26 +82,22 @@ function getCookiesPath(): string | null {
 
 /**
  * Spawns the yt-dlp process configured with cookie paths and user-agent overrides.
- * @param args Array of command-line arguments to pass to yt-dlp.
- * @returns ChildProcess instance running yt-dlp.
  */
 function runYtDlp(args: string[]) {
   const cookies = getCookiesPath();
   const cookieArgs = cookies ? ["--cookies", cookies] : [];
 
-  // REMOVED: extractor-args and user-agent spoofing. 
-  // Let yt-dlp use its default clients to bypass blocks dynamically.
+  // FIXED: Flag is singular (--no-check-certificate). 
+  // Left out extractor-args to let yt-dlp handle IP blocks dynamically.
   const bypassArgs = [
-    "--no-check-certificates",
+    "--no-check-certificate",
   ];
 
   return spawn(getYtDlpPath(), [...cookieArgs, ...bypassArgs, ...args]);
 }
 
 /**
- * Parses and extracts the unique 11-character YouTube video identifier from standard or shortened URLs.
- * @param url YouTube video link or share URL string.
- * @returns The 11-character video ID string, or null if no match is found.
+ * Parses and extracts the unique 11-character YouTube video identifier.
  */
 function extractVideoId(url: string): string | null {
   const match = url.match(
@@ -115,12 +108,18 @@ function extractVideoId(url: string): string | null {
 
 /**
  * Fetches JSON metadata for a specified YouTube video via yt-dlp execution.
- * @param url Full target YouTube video URL string.
- * @returns Promise resolving to the parsed metadata object for the video.
  */
 function getYoutubeInfo(url: string): Promise<any> {
   return new Promise((resolve, reject) => {
-    const child = runYtDlp(["-j", "--no-playlist", "--no-warnings", url]);
+    // FIXED: Passed a foolproof format string to the JSON step so it doesn't 
+    // try to evaluate formats that require ffmpeg and crash early.
+    const child = runYtDlp([
+      "-j", 
+      "-f", "140/bestaudio/best",
+      "--no-playlist", 
+      "--no-warnings", 
+      url
+    ]);
 
     let output = "";
     let error = "";
@@ -153,16 +152,15 @@ function getYoutubeInfo(url: string): Promise<any> {
 
 /**
  * Downloads and buffers the best available audio stream for a YouTube video.
- * @param url Full target YouTube video URL string.
- * @returns Promise resolving to a Buffer containing raw audio data.
  */
 function getAudioBuffer(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    // FIXED: Explicitly target format 140 (YouTube's standard standalone m4a audio).
+    // This format never requires ffmpeg to process. 
+    // If it fails, it cascades down to bestaudio, and then to best.
     const child = runYtDlp([
-      "-f",
-      "ba/b", // CHANGED: Simplified fallback string
-      "-o",
-      "-",
+      "-f", "140/bestaudio/best",
+      "-o", "-",
       "--no-playlist",
       "--no-warnings",
       url,
@@ -195,9 +193,6 @@ function getAudioBuffer(url: string): Promise<Buffer> {
 
 /**
  * Submits a file buffer to Top4Top hosting services via multi-part form payloads.
- * @param buffer Raw binary buffer of the target file.
- * @param filename File name string to save on remote host.
- * @returns Promise resolving to the generated file hosting URL string.
  */
 async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> {
   const userAgent =
@@ -206,8 +201,7 @@ async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> 
   const initResponse = await axios.get("https://top4top.io/", {
     headers: {
       "User-Agent": userAgent,
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     },
   });
 
@@ -272,23 +266,14 @@ async function uploadTop4Top(buffer: Buffer, filename: string): Promise<string> 
   throw new Error("Top4Top failed to return a valid upload URL.");
 }
 
-/**
- * Route handler rendering dashboard views.
- */
 app.get("/", (_req: Request, res: Response) => {
   res.render("index", { title: "Home", activePath: "/" });
 });
 
-/**
- * Route handler rendering converter views.
- */
 app.get("/boombox", (_req: Request, res: Response) => {
   res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
 
-/**
- * Diagnostic route inspecting existing deployment environment cookies.
- */
 app.get("/api/debug-cookies", (_req: Request, res: Response) => {
   const cookiePath = getCookiesPath();
 
@@ -311,9 +296,6 @@ app.get("/api/debug-cookies", (_req: Request, res: Response) => {
   }
 });
 
-/**
- * Process POST request to download YouTube video stream audio and upload resulting artifact to Top4Top.
- */
 app.post("/api/ytdl", async (req: Request, res: Response) => {
   try {
     const { url } = req.body;
@@ -329,11 +311,13 @@ app.post("/api/ytdl", async (req: Request, res: Response) => {
     }
 
     const youtubeUrl = `https://youtube.com/watch?v=${id}`;
+    
     const info = await getYoutubeInfo(youtubeUrl);
     const audio = await getAudioBuffer(youtubeUrl);
 
     const safeTitle = (info.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
     const filename = `${safeTitle}.mp3`;
+    
     const urlResult = await uploadTop4Top(audio, filename);
 
     return res.status(200).json({ title: info.title, url: urlResult });
@@ -347,9 +331,6 @@ app.post("/api/ytdl", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * Process POST request containing direct client upload file payloads for Top4Top re-hosting.
- */
 app.post(
   "/api/upload",
   upload.single("file"),
