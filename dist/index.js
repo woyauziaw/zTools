@@ -11,7 +11,7 @@ const app = express();
 app.use(express.json());
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 15 * 1024 * 1024 },
+    limits: { fileSize: 4.5 * 1024 * 1024 },
 });
 app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "pug");
@@ -28,7 +28,7 @@ function extractVideoId(url) {
     return match ? match[1] : null;
 }
 /**
- * Decrypts backend payload data using AES-128-CBC.
+ * Decrypts internal payload data using AES-128-CBC.
  * @param {string} enc - Base64 encoded encrypted string.
  * @returns {any} Parsed JSON metadata object.
  */
@@ -166,7 +166,7 @@ app.get("/api", (_req, res) => {
     res.render("api", { title: "API Documentation", activePath: "/api" });
 });
 /**
- * Fetches audio internally, downloads it, then re-uploads to Top4Top.
+ * Fetches audio internally for a single URL, downloads it, then uploads to Top4Top.
  */
 app.post("/api/ytdl", async (req, res) => {
     try {
@@ -199,12 +199,16 @@ app.post("/api/ytdl", async (req, res) => {
     }
 });
 /**
- * Uploads a local audio file directly to Top4Top.
+ * Uploads a single local audio file (max 4.5MB for Vercel limit) directly to Top4Top.
  */
 app.post("/api/upload", upload.single("file"), async (req, res) => {
     try {
         if (!req.file) {
             res.status(400).json({ error: "No file provided." });
+            return;
+        }
+        if (req.file.size > 4.5 * 1024 * 1024) {
+            res.status(400).json({ error: "File size exceeds the 4.5MB Vercel serverless limit." });
             return;
         }
         const url = await uploadTop4Top(req.file.buffer, req.file.originalname, req.file.mimetype);
