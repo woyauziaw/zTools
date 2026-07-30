@@ -4,6 +4,7 @@ import FormData from "form-data";
 import axios from "axios";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createDecipheriv } from "crypto";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
@@ -15,91 +16,81 @@ const upload = multer({
 app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "pug");
 app.use(express.static(path.join(__dirname, "..", "public")));
-/**
- * Piped public API instances.
- * Source: https://github.com/TeamPiped/Piped/wiki/Instances
- * Endpoint: GET /streams/:videoId
- */
-const PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi-libre.kavin.rocks",
-    "https://piped-api.privacy.com.de",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.yt",
-    "https://pipedapi.drgns.space",
-    "https://pipedapi.darkness.services",
-];
-const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const BROWSER_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36";
+const audioQualities = [92, 128, 256, 320];
 /**
  * Extracts YouTube Video ID from various URL formats.
- * @param url - YouTube video URL string.
- * @returns Video ID string if valid, otherwise null.
+ * @param {string} url - YouTube video URL string.
+ * @returns {string | null} Video ID string if valid, otherwise null.
  */
 function extractVideoId(url) {
     const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/);
     return match ? match[1] : null;
 }
 /**
- * Validates that a response is a proper Piped streams response.
- * @param data - Parsed response body.
+ * Decrypts backend payload data using AES-128-CBC.
+ * @param {string} enc - Base64 encoded encrypted string.
+ * @returns {any} Parsed JSON metadata object.
  */
-function isValidPipedResponse(data) {
-    return (data !== null &&
-        typeof data === "object" &&
-        !Array.isArray(data) &&
-        typeof data.title === "string" &&
-        Array.isArray(data.audioStreams));
+function decodePayload(enc) {
+    const secretKey = "C5D58EF67A7584E4A29F6C35BBC4EB12";
+    const data = Buffer.from(enc, "base64");
+    const iv = data.slice(0, 16);
+    const content = data.slice(16);
+    const key = Buffer.from(secretKey, "hex");
+    const decipher = createDecipheriv("aes-128-cbc", key, iv);
+    const decrypted = Buffer.concat([
+        decipher.update(content),
+        decipher.final(),
+    ]);
+    return JSON.parse(decrypted.toString());
 }
 /**
- * Fetches stream info from Piped API, trying each instance in sequence.
- * @param videoId - YouTube video ID.
+ * Fetches direct audio stream URL internally without exposing third-party services.
+ * @param {string} videoUrl - Full YouTube video URL.
+ * @param {number} quality - Audio bitrate.
+ * @returns {Promise<{ title: string; url: string }>} Audio title and direct stream URL.
  */
-async function fetchPipedStreams(videoId) {
-    const errors = [];
-    for (const instance of PIPED_INSTANCES) {
-        try {
-            const response = await axios.get(`${instance}/streams/${videoId}`, {
-                timeout: 20000,
-                headers: {
-                    "User-Agent": BROWSER_UA,
-                    Accept: "application/json",
-                },
-            });
-            const data = response.data;
-            if (!isValidPipedResponse(data)) {
-                errors.push(`${instance} (invalid response)`);
-                continue;
-            }
-            return data;
-        }
-        catch (err) {
-            const status = err?.response?.status ?? "network error";
-            errors.push(`${instance} (${status})`);
-        }
+async function fetchInternalAudioStream(videoUrl, quality) {
+    const cdnRes = await axios.get("https://media.savetube.vip/api/random-cdn", {
+        headers: { "User-Agent": BROWSER_UA },
+        timeout: 10000,
+    });
+    const cdn = cdnRes.data.cdn;
+    const infoRes = await axios.post(`https://${cdn}/v2/info`, { url: videoUrl }, {
+        headers: {
+            "User-Agent": BROWSER_UA,
+            Referer: "https://save-tube.com/",
+            "Content-Type": "application/json",
+        },
+        timeout: 15000,
+    });
+    const info = decodePayload(infoRes.data.data);
+    const downloadRes = await axios.post(`https://${cdn}/download`, {
+        downloadType: "audio",
+        quality: `${quality}`,
+        key: info.key,
+    }, {
+        headers: {
+            "Content-Type": "application/json",
+            "User-Agent": BROWSER_UA,
+            Referer: "https://save-tube.com/",
+        },
+        timeout: 15000,
+    });
+    const downloadUrl = downloadRes.data?.data?.downloadUrl;
+    if (!downloadUrl) {
+        throw new Error("Failed to resolve audio stream URL.");
     }
-    throw new Error(`All Piped instances failed: ${errors.join(", ")}`);
-}
-/**
- * Picks the best audio stream from Piped audioStreams array.
- * Sorts by bitrate descending and picks the highest quality.
- * @param data - Piped streams API response.
- */
-function pickBestAudio(data) {
-    const streams = data.audioStreams.filter((s) => s.url && !s.videoOnly);
-    if (streams.length === 0) {
-        throw new Error("No audio streams available for this video.");
-    }
-    streams.sort((a, b) => b.bitrate - a.bitrate);
-    const best = streams[0];
-    const ext = best.mimeType?.includes("webm") ? "webm" :
-        best.mimeType?.includes("mp4") ? "m4a" :
-            best.format?.toLowerCase() ?? "webm";
-    return { url: best.url, ext, mimeType: best.mimeType ?? "audio/webm" };
+    return {
+        title: info.title || "audio",
+        url: downloadUrl,
+    };
 }
 /**
  * Downloads content from a direct URL into a Buffer.
- * @param url - Direct stream URL.
+ * @param {string} url - Direct stream URL.
+ * @returns {Promise<Buffer>} Downloaded file buffer.
  */
 async function downloadToBuffer(url) {
     const response = await axios.get(url, {
@@ -112,10 +103,10 @@ async function downloadToBuffer(url) {
 }
 /**
  * Uploads a file buffer to Top4Top file hosting service.
- * @param buffer - File content.
- * @param filename - File name with extension.
- * @param contentType - MIME type.
- * @returns Direct download URL.
+ * @param {Buffer} buffer - File content.
+ * @param {string} filename - File name with extension.
+ * @param {string} contentType - MIME type.
+ * @returns {Promise<string>} Direct download URL.
  */
 async function uploadTop4Top(buffer, filename, contentType = "application/octet-stream") {
     const initResponse = await axios.get("https://top4top.io/", {
@@ -156,8 +147,9 @@ async function uploadTop4Top(buffer, filename, contentType = "application/octet-
     ];
     for (const regex of patterns) {
         const match = html.match(regex);
-        if (match)
+        if (match) {
             return match[1] || match[0];
+        }
     }
     throw new Error("Top4Top failed to return a valid upload URL.");
 }
@@ -167,61 +159,41 @@ app.get("/", (_req, res) => {
 app.get("/boombox", (_req, res) => {
     res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
-/** Debug: inspect Piped response for a given video ID */
-app.get("/api/debug-piped/:id", async (req, res) => {
-    const { id } = req.params;
-    const results = [];
-    for (const instance of PIPED_INSTANCES) {
-        try {
-            const response = await axios.get(`${instance}/streams/${id}`, {
-                timeout: 20000,
-                headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
-            });
-            const data = response.data;
-            const valid = isValidPipedResponse(data);
-            results.push({
-                instance,
-                valid,
-                title: valid ? data.title : null,
-                audioStreamsCount: valid ? data.audioStreams.length : "N/A",
-                audioStreamsSample: valid ? data.audioStreams.slice(0, 2) : [],
-            });
-            if (valid)
-                break;
-        }
-        catch (err) {
-            results.push({
-                instance,
-                valid: false,
-                error: `${err?.response?.status ?? err.message}`,
-            });
-        }
-    }
-    return res.json(results);
+/**
+ * Renders the API documentation view page.
+ */
+app.get("/api", (_req, res) => {
+    res.render("api", { title: "API Documentation", activePath: "/api" });
 });
 /**
- * Fetches audio via Piped API, downloads it, then re-uploads to Top4Top.
+ * Fetches audio internally, downloads it, then re-uploads to Top4Top.
  */
 app.post("/api/ytdl", async (req, res) => {
     try {
-        const { url } = req.body;
+        const { url, quality } = req.body;
         if (!url) {
-            return res.status(400).json({ error: "URL parameter is required." });
+            res.status(400).json({ error: "URL parameter is required." });
+            return;
         }
         const id = extractVideoId(url);
         if (!id) {
-            return res.status(400).json({ error: "Invalid YouTube URL format." });
+            res.status(400).json({ error: "Invalid YouTube URL format." });
+            return;
         }
-        const data = await fetchPipedStreams(id);
-        const { url: audioUrl, ext, mimeType } = pickBestAudio(data);
-        const buffer = await downloadToBuffer(audioUrl);
-        const safeTitle = (data.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
-        const filename = `${safeTitle}.${ext}`;
-        const uploaded = await uploadTop4Top(buffer, filename, mimeType);
-        return res.json({ title: data.title, url: uploaded });
+        const requestedQuality = Number(quality) || 128;
+        const format = audioQualities.includes(requestedQuality)
+            ? requestedQuality
+            : 128;
+        const cleanUrl = `https://www.youtube.com/watch?v=${id}`;
+        const audioData = await fetchInternalAudioStream(cleanUrl, format);
+        const buffer = await downloadToBuffer(audioData.url);
+        const safeTitle = (audioData.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
+        const filename = `${safeTitle}.${format}kbps.mp3`;
+        const uploaded = await uploadTop4Top(buffer, filename, "audio/mpeg");
+        res.json({ title: audioData.title, url: uploaded });
     }
     catch (err) {
-        return res.status(500).json({
+        res.status(500).json({
             error: err?.message || "An unexpected error occurred.",
         });
     }
@@ -232,13 +204,14 @@ app.post("/api/ytdl", async (req, res) => {
 app.post("/api/upload", upload.single("file"), async (req, res) => {
     try {
         if (!req.file) {
-            return res.status(400).json({ error: "No file provided." });
+            res.status(400).json({ error: "No file provided." });
+            return;
         }
         const url = await uploadTop4Top(req.file.buffer, req.file.originalname, req.file.mimetype);
-        return res.json({ title: req.file.originalname, url });
+        res.json({ title: req.file.originalname, url });
     }
     catch (err) {
-        return res.status(500).json({ error: err?.message || "Upload failed." });
+        res.status(500).json({ error: err?.message || "Upload failed." });
     }
 });
 export default app;
