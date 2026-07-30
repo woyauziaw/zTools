@@ -16,15 +16,19 @@ app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "pug");
 app.use(express.static(path.join(__dirname, "..", "public")));
 /**
- * List of Invidious public instances to try in order.
- * Source: https://docs.invidious.io/instances/
+ * Invidious public instances without CAPTCHA/anti-bot.
+ * Source: https://docs.invidious.io/instances/ (updated 2026-07)
+ * Excludes inv.nadeko.net (Go-away CAPTCHA blocks server requests).
  */
 const INVIDIOUS_INSTANCES = [
-    "https://inv.nadeko.net",
     "https://invidious.nerdvpn.de",
+    "https://invidious.f5.si",
+    "https://invidious.tiekoetter.com",
+    "https://yt.chocolatemoo53.com",
     "https://inv.thepixora.com",
-    "https://yewtu.be",
 ];
+const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 /**
  * Extracts YouTube Video ID from various URL formats.
  * @param url - YouTube video URL string.
@@ -35,75 +39,72 @@ function extractVideoId(url) {
     return match ? match[1] : null;
 }
 /**
- * Fetches video metadata from the first responding Invidious instance.
- * Tries each instance in sequence until one succeeds.
+ * Fetches video metadata from Invidious, trying each instance in sequence.
  * @param videoId - YouTube video ID.
- * @returns Invidious video API response.
  */
 async function fetchInvidiousVideo(videoId) {
-    let lastError = new Error("No Invidious instances available.");
+    const errors = [];
     for (const instance of INVIDIOUS_INSTANCES) {
         try {
-            const response = await axios.get(`${instance}/api/v1/videos/${videoId}`, { timeout: 15000 });
+            const response = await axios.get(`${instance}/api/v1/videos/${videoId}`, {
+                timeout: 20000,
+                headers: {
+                    "User-Agent": BROWSER_UA,
+                    Accept: "application/json",
+                },
+            });
             return response.data;
         }
         catch (err) {
-            lastError = new Error(`${instance} failed: ${err.message}`);
+            const status = err?.response?.status ?? "network error";
+            errors.push(`${instance} (${status})`);
         }
     }
-    throw lastError;
+    throw new Error(`All Invidious instances failed: ${errors.join(", ")}`);
 }
 /**
- * Picks the best audio-only URL from Invidious adaptiveFormats.
- * Prefers opus/webm, falls back to any audio format, then formatStreams.
+ * Picks the best audio-only format from Invidious adaptiveFormats.
+ * Falls back to formatStreams (muxed) if no audio-only format is available.
  * @param data - Invidious video API response.
- * @returns Direct audio URL and container extension.
  */
 function pickAudioFormat(data) {
-    const audioFormats = data.adaptiveFormats.filter((f) => f.type.startsWith("audio/") && f.url);
-    if (audioFormats.length > 0) {
-        /** Sort by bitrate descending to get best quality */
-        audioFormats.sort((a, b) => parseInt(b.bitrate) - parseInt(a.bitrate));
-        const best = audioFormats[0];
-        const ext = best.container ?? (best.type.includes("webm") ? "webm" : "m4a");
+    const audioOnly = data.adaptiveFormats.filter((f) => f.type?.startsWith("audio/") && f.url);
+    if (audioOnly.length > 0) {
+        audioOnly.sort((a, b) => parseInt(b.bitrate) - parseInt(a.bitrate));
+        const best = audioOnly[0];
+        const ext = best.container ||
+            (best.type.includes("webm") ? "webm" : "m4a");
         return { url: best.url, ext };
     }
-    /** Fallback to formatStreams (muxed video+audio) */
-    if (data.formatStreams.length > 0) {
-        const stream = data.formatStreams[0];
-        return { url: stream.url, ext: stream.container ?? "mp4" };
+    if (data.formatStreams?.length > 0) {
+        const s = data.formatStreams[0];
+        return { url: s.url, ext: s.container || "mp4" };
     }
     throw new Error("No downloadable audio format found for this video.");
 }
 /**
- * Downloads audio from a direct URL into a Buffer.
- * @param url - Direct audio stream URL.
- * @returns Buffer containing the audio data.
+ * Downloads content from a direct URL into a Buffer.
+ * @param url - Direct stream URL.
  */
 async function downloadToBuffer(url) {
     const response = await axios.get(url, {
         responseType: "arraybuffer",
         timeout: 120000,
         maxContentLength: Infinity,
-        headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
+        headers: { "User-Agent": BROWSER_UA },
     });
     return Buffer.from(response.data);
 }
 /**
  * Uploads a file buffer to Top4Top file hosting service.
- * @param buffer - File content stored in a Buffer.
- * @param filename - Name of the file including extension.
- * @param contentType - MIME type of the file.
- * @returns Direct download URL from Top4Top.
+ * @param buffer - File content.
+ * @param filename - File name with extension.
+ * @param contentType - MIME type.
+ * @returns Direct download URL.
  */
 async function uploadTop4Top(buffer, filename, contentType = "application/octet-stream") {
-    const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     const initResponse = await axios.get("https://top4top.io/", {
-        headers: { "User-Agent": userAgent },
+        headers: { "User-Agent": BROWSER_UA },
         timeout: 30000,
     });
     const initHtml = initResponse.data;
@@ -122,7 +123,7 @@ async function uploadTop4Top(buffer, filename, contentType = "application/octet-
     const uploadResponse = await axios.post("https://top4top.io/index.php", form.getBuffer(), {
         headers: {
             ...form.getHeaders(),
-            "User-Agent": userAgent,
+            "User-Agent": BROWSER_UA,
             Cookie: cookieHeader,
             Referer: "https://top4top.io/",
             Origin: "https://top4top.io",
@@ -145,11 +146,9 @@ async function uploadTop4Top(buffer, filename, contentType = "application/octet-
     }
     throw new Error("Top4Top failed to return a valid upload URL.");
 }
-/** Render Index */
 app.get("/", (_req, res) => {
     res.render("index", { title: "Home", activePath: "/" });
 });
-/** Render Boombox */
 app.get("/boombox", (_req, res) => {
     res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
@@ -169,7 +168,8 @@ app.post("/api/ytdl", async (req, res) => {
         const data = await fetchInvidiousVideo(id);
         const { url: audioUrl, ext } = pickAudioFormat(data);
         const buffer = await downloadToBuffer(audioUrl);
-        const filename = (data.title || "audio").replace(/[^a-zA-Z0-9]/g, "_") + "." + ext;
+        const safeTitle = (data.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
+        const filename = `${safeTitle}.${ext}`;
         const mimeType = ext === "webm" ? "audio/webm" :
             ext === "m4a" ? "audio/mp4" :
                 ext === "mp4" ? "video/mp4" : "application/octet-stream";
@@ -183,7 +183,7 @@ app.post("/api/ytdl", async (req, res) => {
     }
 });
 /**
- * Uploads a local MP3/audio file directly to Top4Top.
+ * Uploads a local audio file directly to Top4Top.
  */
 app.post("/api/upload", upload.single("file"), async (req, res) => {
     try {
@@ -194,9 +194,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
         return res.json({ title: req.file.originalname, url });
     }
     catch (err) {
-        return res.status(500).json({
-            error: err?.message || "Upload failed.",
-        });
+        return res.status(500).json({ error: err?.message || "Upload failed." });
     }
 });
 export default app;
