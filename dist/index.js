@@ -16,15 +16,18 @@ app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "pug");
 app.use(express.static(path.join(__dirname, "..", "public")));
 /**
- * Invidious public instances without CAPTCHA/anti-bot.
- * Source: https://docs.invidious.io/instances/ (updated 2026-07)
+ * Piped public API instances.
+ * Source: https://github.com/TeamPiped/Piped/wiki/Instances
+ * Endpoint: GET /streams/:videoId
  */
-const INVIDIOUS_INSTANCES = [
-    "https://invidious.nerdvpn.de",
-    "https://invidious.f5.si",
-    "https://invidious.tiekoetter.com",
-    "https://yt.chocolatemoo53.com",
-    "https://inv.thepixora.com",
+const PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi-libre.kavin.rocks",
+    "https://piped-api.privacy.com.de",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.yt",
+    "https://pipedapi.drgns.space",
+    "https://pipedapi.darkness.services",
 ];
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -38,27 +41,25 @@ function extractVideoId(url) {
     return match ? match[1] : null;
 }
 /**
- * Validates that a parsed response object is a proper Invidious video response.
- * Guards against HTML error pages returned as 200 OK.
+ * Validates that a response is a proper Piped streams response.
  * @param data - Parsed response body.
  */
-function isValidInvidiousResponse(data) {
+function isValidPipedResponse(data) {
     return (data !== null &&
         typeof data === "object" &&
         !Array.isArray(data) &&
         typeof data.title === "string" &&
-        (Array.isArray(data.adaptiveFormats) || Array.isArray(data.formatStreams)));
+        Array.isArray(data.audioStreams));
 }
 /**
- * Fetches video metadata from Invidious, trying each instance in sequence.
- * Skips instances that return non-JSON or malformed responses.
+ * Fetches stream info from Piped API, trying each instance in sequence.
  * @param videoId - YouTube video ID.
  */
-async function fetchInvidiousVideo(videoId) {
+async function fetchPipedStreams(videoId) {
     const errors = [];
-    for (const instance of INVIDIOUS_INSTANCES) {
+    for (const instance of PIPED_INSTANCES) {
         try {
-            const response = await axios.get(`${instance}/api/v1/videos/${videoId}`, {
+            const response = await axios.get(`${instance}/streams/${videoId}`, {
                 timeout: 20000,
                 headers: {
                     "User-Agent": BROWSER_UA,
@@ -66,8 +67,8 @@ async function fetchInvidiousVideo(videoId) {
                 },
             });
             const data = response.data;
-            if (!isValidInvidiousResponse(data)) {
-                errors.push(`${instance} (invalid response structure)`);
+            if (!isValidPipedResponse(data)) {
+                errors.push(`${instance} (invalid response)`);
                 continue;
             }
             return data;
@@ -77,28 +78,24 @@ async function fetchInvidiousVideo(videoId) {
             errors.push(`${instance} (${status})`);
         }
     }
-    throw new Error(`All Invidious instances failed: ${errors.join(", ")}`);
+    throw new Error(`All Piped instances failed: ${errors.join(", ")}`);
 }
 /**
- * Picks the best audio-only format from Invidious adaptiveFormats.
- * Falls back to formatStreams (muxed) if no audio-only format is available.
- * @param data - Invidious video API response.
+ * Picks the best audio stream from Piped audioStreams array.
+ * Sorts by bitrate descending and picks the highest quality.
+ * @param data - Piped streams API response.
  */
-function pickAudioFormat(data) {
-    const adaptiveFormats = data.adaptiveFormats ?? [];
-    const formatStreams = data.formatStreams ?? [];
-    const audioOnly = adaptiveFormats.filter((f) => f.type?.startsWith("audio/") && f.url);
-    if (audioOnly.length > 0) {
-        audioOnly.sort((a, b) => parseInt(b.bitrate) - parseInt(a.bitrate));
-        const best = audioOnly[0];
-        const ext = best.container || (best.type.includes("webm") ? "webm" : "m4a");
-        return { url: best.url, ext };
+function pickBestAudio(data) {
+    const streams = data.audioStreams.filter((s) => s.url && !s.videoOnly);
+    if (streams.length === 0) {
+        throw new Error("No audio streams available for this video.");
     }
-    if (formatStreams.length > 0) {
-        const s = formatStreams[0];
-        return { url: s.url, ext: s.container || "mp4" };
-    }
-    throw new Error("No downloadable audio format found for this video.");
+    streams.sort((a, b) => b.bitrate - a.bitrate);
+    const best = streams[0];
+    const ext = best.mimeType?.includes("webm") ? "webm" :
+        best.mimeType?.includes("mp4") ? "m4a" :
+            best.format?.toLowerCase() ?? "webm";
+    return { url: best.url, ext, mimeType: best.mimeType ?? "audio/webm" };
 }
 /**
  * Downloads content from a direct URL into a Buffer.
@@ -170,29 +167,24 @@ app.get("/", (_req, res) => {
 app.get("/boombox", (_req, res) => {
     res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
-/** Debug: inspect raw Invidious response for a given video ID */
-app.get("/api/debug-invidious/:id", async (req, res) => {
+/** Debug: inspect Piped response for a given video ID */
+app.get("/api/debug-piped/:id", async (req, res) => {
     const { id } = req.params;
     const results = [];
-    for (const instance of INVIDIOUS_INSTANCES) {
+    for (const instance of PIPED_INSTANCES) {
         try {
-            const response = await axios.get(`${instance}/api/v1/videos/${id}`, {
+            const response = await axios.get(`${instance}/streams/${id}`, {
                 timeout: 20000,
                 headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
             });
             const data = response.data;
-            const valid = isValidInvidiousResponse(data);
+            const valid = isValidPipedResponse(data);
             results.push({
                 instance,
                 valid,
                 title: valid ? data.title : null,
-                adaptiveFormatsCount: valid ? (data.adaptiveFormats?.length ?? 0) : "N/A",
-                formatStreamsCount: valid ? (data.formatStreams?.length ?? 0) : "N/A",
-                responseType: typeof data,
-                isArray: Array.isArray(data),
-                sampleKeys: typeof data === "object" && !Array.isArray(data)
-                    ? Object.keys(data).slice(0, 10)
-                    : [],
+                audioStreamsCount: valid ? data.audioStreams.length : "N/A",
+                audioStreamsSample: valid ? data.audioStreams.slice(0, 2) : [],
             });
             if (valid)
                 break;
@@ -208,7 +200,7 @@ app.get("/api/debug-invidious/:id", async (req, res) => {
     return res.json(results);
 });
 /**
- * Fetches audio via Invidious API, downloads it, then re-uploads to Top4Top.
+ * Fetches audio via Piped API, downloads it, then re-uploads to Top4Top.
  */
 app.post("/api/ytdl", async (req, res) => {
     try {
@@ -220,14 +212,11 @@ app.post("/api/ytdl", async (req, res) => {
         if (!id) {
             return res.status(400).json({ error: "Invalid YouTube URL format." });
         }
-        const data = await fetchInvidiousVideo(id);
-        const { url: audioUrl, ext } = pickAudioFormat(data);
+        const data = await fetchPipedStreams(id);
+        const { url: audioUrl, ext, mimeType } = pickBestAudio(data);
         const buffer = await downloadToBuffer(audioUrl);
         const safeTitle = (data.title || "audio").replace(/[^a-zA-Z0-9]/g, "_");
         const filename = `${safeTitle}.${ext}`;
-        const mimeType = ext === "webm" ? "audio/webm" :
-            ext === "m4a" ? "audio/mp4" :
-                ext === "mp4" ? "video/mp4" : "application/octet-stream";
         const uploaded = await uploadTop4Top(buffer, filename, mimeType);
         return res.json({ title: data.title, url: uploaded });
     }
