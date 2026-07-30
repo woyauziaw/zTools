@@ -18,7 +18,6 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 /**
  * Invidious public instances without CAPTCHA/anti-bot.
  * Source: https://docs.invidious.io/instances/ (updated 2026-07)
- * Excludes inv.nadeko.net (Go-away CAPTCHA blocks server requests).
  */
 const INVIDIOUS_INSTANCES = [
     "https://invidious.nerdvpn.de",
@@ -68,16 +67,17 @@ async function fetchInvidiousVideo(videoId) {
  * @param data - Invidious video API response.
  */
 function pickAudioFormat(data) {
-    const audioOnly = data.adaptiveFormats.filter((f) => f.type?.startsWith("audio/") && f.url);
+    const adaptiveFormats = data.adaptiveFormats ?? [];
+    const formatStreams = data.formatStreams ?? [];
+    const audioOnly = adaptiveFormats.filter((f) => f.type?.startsWith("audio/") && f.url);
     if (audioOnly.length > 0) {
         audioOnly.sort((a, b) => parseInt(b.bitrate) - parseInt(a.bitrate));
         const best = audioOnly[0];
-        const ext = best.container ||
-            (best.type.includes("webm") ? "webm" : "m4a");
+        const ext = best.container || (best.type.includes("webm") ? "webm" : "m4a");
         return { url: best.url, ext };
     }
-    if (data.formatStreams?.length > 0) {
-        const s = data.formatStreams[0];
+    if (formatStreams.length > 0) {
+        const s = formatStreams[0];
         return { url: s.url, ext: s.container || "mp4" };
     }
     throw new Error("No downloadable audio format found for this video.");
@@ -151,6 +151,35 @@ app.get("/", (_req, res) => {
 });
 app.get("/boombox", (_req, res) => {
     res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
+});
+/** Temporary: debug Invidious response structure for a given video ID */
+app.get("/api/debug-invidious/:id", async (req, res) => {
+    const { id } = req.params;
+    const errors = [];
+    for (const instance of INVIDIOUS_INSTANCES) {
+        try {
+            const response = await axios.get(`${instance}/api/v1/videos/${id}`, {
+                timeout: 20000,
+                headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
+            });
+            const data = response.data;
+            return res.json({
+                instance,
+                title: data.title,
+                hasAdaptiveFormats: Array.isArray(data.adaptiveFormats),
+                adaptiveFormatsCount: data.adaptiveFormats?.length ?? 0,
+                hasFormatStreams: Array.isArray(data.formatStreams),
+                formatStreamsCount: data.formatStreams?.length ?? 0,
+                adaptiveFormatsSample: data.adaptiveFormats?.slice(0, 3) ?? [],
+                formatStreamsSample: data.formatStreams?.slice(0, 2) ?? [],
+                allKeys: Object.keys(data),
+            });
+        }
+        catch (err) {
+            errors.push(`${instance}: ${err?.response?.status ?? err.message}`);
+        }
+    }
+    return res.status(500).json({ errors });
 });
 /**
  * Fetches audio via Invidious API, downloads it, then re-uploads to Top4Top.
