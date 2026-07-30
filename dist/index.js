@@ -38,7 +38,20 @@ function extractVideoId(url) {
     return match ? match[1] : null;
 }
 /**
+ * Validates that a parsed response object is a proper Invidious video response.
+ * Guards against HTML error pages returned as 200 OK.
+ * @param data - Parsed response body.
+ */
+function isValidInvidiousResponse(data) {
+    return (data !== null &&
+        typeof data === "object" &&
+        !Array.isArray(data) &&
+        typeof data.title === "string" &&
+        (Array.isArray(data.adaptiveFormats) || Array.isArray(data.formatStreams)));
+}
+/**
  * Fetches video metadata from Invidious, trying each instance in sequence.
+ * Skips instances that return non-JSON or malformed responses.
  * @param videoId - YouTube video ID.
  */
 async function fetchInvidiousVideo(videoId) {
@@ -52,7 +65,12 @@ async function fetchInvidiousVideo(videoId) {
                     Accept: "application/json",
                 },
             });
-            return response.data;
+            const data = response.data;
+            if (!isValidInvidiousResponse(data)) {
+                errors.push(`${instance} (invalid response structure)`);
+                continue;
+            }
+            return data;
         }
         catch (err) {
             const status = err?.response?.status ?? "network error";
@@ -152,10 +170,10 @@ app.get("/", (_req, res) => {
 app.get("/boombox", (_req, res) => {
     res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
-/** Temporary: debug Invidious response structure for a given video ID */
+/** Debug: inspect raw Invidious response for a given video ID */
 app.get("/api/debug-invidious/:id", async (req, res) => {
     const { id } = req.params;
-    const errors = [];
+    const results = [];
     for (const instance of INVIDIOUS_INSTANCES) {
         try {
             const response = await axios.get(`${instance}/api/v1/videos/${id}`, {
@@ -163,23 +181,31 @@ app.get("/api/debug-invidious/:id", async (req, res) => {
                 headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
             });
             const data = response.data;
-            return res.json({
+            const valid = isValidInvidiousResponse(data);
+            results.push({
                 instance,
-                title: data.title,
-                hasAdaptiveFormats: Array.isArray(data.adaptiveFormats),
-                adaptiveFormatsCount: data.adaptiveFormats?.length ?? 0,
-                hasFormatStreams: Array.isArray(data.formatStreams),
-                formatStreamsCount: data.formatStreams?.length ?? 0,
-                adaptiveFormatsSample: data.adaptiveFormats?.slice(0, 3) ?? [],
-                formatStreamsSample: data.formatStreams?.slice(0, 2) ?? [],
-                allKeys: Object.keys(data),
+                valid,
+                title: valid ? data.title : null,
+                adaptiveFormatsCount: valid ? (data.adaptiveFormats?.length ?? 0) : "N/A",
+                formatStreamsCount: valid ? (data.formatStreams?.length ?? 0) : "N/A",
+                responseType: typeof data,
+                isArray: Array.isArray(data),
+                sampleKeys: typeof data === "object" && !Array.isArray(data)
+                    ? Object.keys(data).slice(0, 10)
+                    : [],
             });
+            if (valid)
+                break;
         }
         catch (err) {
-            errors.push(`${instance}: ${err?.response?.status ?? err.message}`);
+            results.push({
+                instance,
+                valid: false,
+                error: `${err?.response?.status ?? err.message}`,
+            });
         }
     }
-    return res.status(500).json({ errors });
+    return res.json(results);
 });
 /**
  * Fetches audio via Invidious API, downloads it, then re-uploads to Top4Top.

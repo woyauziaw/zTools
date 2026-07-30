@@ -64,7 +64,23 @@ interface InvidiousVideoResponse {
 }
 
 /**
+ * Validates that a parsed response object is a proper Invidious video response.
+ * Guards against HTML error pages returned as 200 OK.
+ * @param data - Parsed response body.
+ */
+function isValidInvidiousResponse(data: any): data is InvidiousVideoResponse {
+  return (
+    data !== null &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    typeof data.title === "string" &&
+    (Array.isArray(data.adaptiveFormats) || Array.isArray(data.formatStreams))
+  );
+}
+
+/**
  * Fetches video metadata from Invidious, trying each instance in sequence.
+ * Skips instances that return non-JSON or malformed responses.
  * @param videoId - YouTube video ID.
  */
 async function fetchInvidiousVideo(
@@ -74,7 +90,7 @@ async function fetchInvidiousVideo(
 
   for (const instance of INVIDIOUS_INSTANCES) {
     try {
-      const response = await axios.get<InvidiousVideoResponse>(
+      const response = await axios.get(
         `${instance}/api/v1/videos/${videoId}`,
         {
           timeout: 20000,
@@ -84,7 +100,15 @@ async function fetchInvidiousVideo(
           },
         }
       );
-      return response.data;
+
+      const data = response.data;
+
+      if (!isValidInvidiousResponse(data)) {
+        errors.push(`${instance} (invalid response structure)`);
+        continue;
+      }
+
+      return data;
     } catch (err: any) {
       const status = err?.response?.status ?? "network error";
       errors.push(`${instance} (${status})`);
@@ -115,7 +139,8 @@ function pickAudioFormat(data: InvidiousVideoResponse): {
   if (audioOnly.length > 0) {
     audioOnly.sort((a, b) => parseInt(b.bitrate) - parseInt(a.bitrate));
     const best = audioOnly[0];
-    const ext = best.container || (best.type.includes("webm") ? "webm" : "m4a");
+    const ext =
+      best.container || (best.type.includes("webm") ? "webm" : "m4a");
     return { url: best.url, ext };
   }
 
@@ -216,10 +241,10 @@ app.get("/boombox", (_req: Request, res: Response) => {
   res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
 });
 
-/** Temporary: debug Invidious response structure for a given video ID */
+/** Debug: inspect raw Invidious response for a given video ID */
 app.get("/api/debug-invidious/:id", async (req: Request, res: Response) => {
   const { id } = req.params;
-  const errors: string[] = [];
+  const results: any[] = [];
 
   for (const instance of INVIDIOUS_INSTANCES) {
     try {
@@ -231,23 +256,30 @@ app.get("/api/debug-invidious/:id", async (req: Request, res: Response) => {
         }
       );
       const data = response.data;
-      return res.json({
+      const valid = isValidInvidiousResponse(data);
+      results.push({
         instance,
-        title: data.title,
-        hasAdaptiveFormats: Array.isArray(data.adaptiveFormats),
-        adaptiveFormatsCount: data.adaptiveFormats?.length ?? 0,
-        hasFormatStreams: Array.isArray(data.formatStreams),
-        formatStreamsCount: data.formatStreams?.length ?? 0,
-        adaptiveFormatsSample: data.adaptiveFormats?.slice(0, 3) ?? [],
-        formatStreamsSample: data.formatStreams?.slice(0, 2) ?? [],
-        allKeys: Object.keys(data),
+        valid,
+        title: valid ? data.title : null,
+        adaptiveFormatsCount: valid ? (data.adaptiveFormats?.length ?? 0) : "N/A",
+        formatStreamsCount: valid ? (data.formatStreams?.length ?? 0) : "N/A",
+        responseType: typeof data,
+        isArray: Array.isArray(data),
+        sampleKeys: typeof data === "object" && !Array.isArray(data)
+          ? Object.keys(data).slice(0, 10)
+          : [],
       });
+      if (valid) break;
     } catch (err: any) {
-      errors.push(`${instance}: ${err?.response?.status ?? err.message}`);
+      results.push({
+        instance,
+        valid: false,
+        error: `${err?.response?.status ?? err.message}`,
+      });
     }
   }
 
-  return res.status(500).json({ errors });
+  return res.json(results);
 });
 
 /**
