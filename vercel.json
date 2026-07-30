@@ -5,11 +5,7 @@
       "src": "dist/index.js",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": [
-          "dist/views/**",
-          "bin/yt-dlp",
-          "bin/cookies.txt"
-        ]
+        "includeFiles": ["dist/views/**"]
       }
     },
     {
@@ -18,17 +14,8 @@
     }
   ],
   "routes": [
-    {
-      "src": "/css/(.*)",
-      "dest": "/public/css/$1"
-    },
-    {
-      "src": "/js/(.*)",
-      "dest": "/public/js/$1"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "dist/index.js"
-    }
+    { "src": "/css/(.*)", "dest": "/public/css/$1" },
+    { "src": "/js/(.*)", "dest": "/public/js/$1" },
+    { "src": "/(.*)", "dest": "dist/index.js" }
   ]
 }

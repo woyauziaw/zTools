@@ -13,6 +13,7 @@ package-lock.json
 installer.js
 
 # public/css/style.css
-# bin/cookies.txt
+# bin/
+# cookies.txt
 .vercel
 .env*

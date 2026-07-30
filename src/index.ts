@@ -3,9 +3,7 @@ import multer from "multer";
 import FormData from "form-data";
 import axios from "axios";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,921 +14,279 @@ app.use(express.json());
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 15 * 1024 * 1024,
-  },
+  limits: { fileSize: 15 * 1024 * 1024 },
 });
 
+app.set("views", path.join(__dirname, "views"));
+app.set("view engine", "pug");
+app.use(express.static(path.join(__dirname, "..", "public")));
 
-app.set(
-  "views",
-  path.join(__dirname, "views")
-);
-
-app.set(
-  "view engine",
-  "pug"
-);
-
-
-app.use(
-  express.static(
-    path.join(__dirname, "..", "public")
-  )
-);
-
-
-
-function getYtDlpPath(): string {
-
-  const binary = path.join(
-    __dirname,
-    "..",
-    "bin",
-    "yt-dlp"
-  );
-
-  if (!fs.existsSync(binary)) {
-    throw new Error(
-      "yt-dlp binary not found: " + binary
-    );
-  }
-
-
-  try {
-    fs.chmodSync(binary, 0o755);
-  } catch {}
-
-  return binary;
-}
-
-
-
-function getCookiesPath(): string | null {
-  const source = path.join(
-    __dirname,
-    "..",
-    "bin",
-    "cookies.txt"
-  );
-
-  if (!fs.existsSync(source)) {
-    return null;
-  }
-
-  const temp = "/tmp/cookies.txt";
-
-  try {
-    fs.copyFileSync(source, temp);
-    return temp;
-  } catch {
-    return source;
-  }
-}
-
-
-
-function runYtDlp(args: string[]) {
-  const cookies = getCookiesPath();
-
-const finalArgs = [
-  "--no-check-certificate",
-  "--no-playlist",
-  "--no-warnings",
-
-"--extractor-args",
-"youtube:player_client=android,web,ios",
-
-  "--user-agent",
-  "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36",
-
-  "--force-ipv4",
+/**
+ * List of Invidious public instances to try in order.
+ * Source: https://docs.invidious.io/instances/
+ */
+const INVIDIOUS_INSTANCES = [
+  "https://inv.nadeko.net",
+  "https://invidious.nerdvpn.de",
+  "https://inv.thepixora.com",
+  "https://yewtu.be",
 ];
 
-  if (cookies) {
-    finalArgs.push(
-      "--cookies",
-      cookies
-    );
-  }
-
-  return spawn(
-    getYtDlpPath(),
-    [
-      ...finalArgs,
-      ...args
-    ]
-  );
-}
+/**
+ * Extracts YouTube Video ID from various URL formats.
+ * @param url - YouTube video URL string.
+ * @returns Video ID string if valid, otherwise null.
+ */
 function extractVideoId(url: string): string | null {
   const match = url.match(
     /(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/
   );
-
   return match ? match[1] : null;
 }
 
-
-
-function getYoutubeInfo(url: string): Promise<any> {
-
-  return new Promise((resolve, reject) => {
-
-    const child = runYtDlp([
-      "-j",
-      url
-    ]);
-
-
-    let output = "";
-    let error = "";
-
-
-    child.stdout.on(
-      "data",
-      (data) => {
-        output += data.toString();
-      }
-    );
-
-
-    child.stderr.on(
-      "data",
-      (data) => {
-        error += data.toString();
-      }
-    );
-
-
-    child.on(
-      "error",
-      (err) => {
-        reject(
-          new Error(
-            "yt-dlp execution failed: " + err.message
-          )
-        );
-      }
-    );
-
-
-    child.on(
-      "close",
-      (code) => {
-
-        if (code !== 0) {
-
-          return reject(
-            new Error(
-              error.trim() ||
-              "Failed getting YouTube information"
-            )
-          );
-
-        }
-
-
-        try {
-
-          const json = JSON.parse(output);
-
-          resolve(json);
-
-        } catch {
-
-          reject(
-            new Error(
-              "Invalid yt-dlp JSON response"
-            )
-          );
-
-        }
-
-      }
-    );
-
-  });
-
+interface InvidiousAdaptiveFormat {
+  url: string;
+  type: string;
+  bitrate: string;
+  audioQuality?: string;
+  audioSampleRate?: string;
+  audioChannels?: string;
+  container: string;
 }
 
-
-
-
-
-function downloadAudio(
-  url: string,
-  format: string
-): Promise<Buffer> {
-
-
-  return new Promise((resolve, reject) => {
-
-
-    const child = runYtDlp([
-
-      "-f",
-      format,
-
-      "-o",
-      "-",
-
-      url
-
-    ]);
-
-
-
-    const chunks: Buffer[] = [];
-
-    let error = "";
-
-
-
-    child.stdout.on(
-      "data",
-      (chunk) => {
-
-        chunks.push(
-          Buffer.from(chunk)
-        );
-
-      }
-    );
-
-
-
-    child.stderr.on(
-      "data",
-      (data) => {
-
-        error += data.toString();
-
-      }
-    );
-
-
-
-    child.on(
-      "error",
-      (err) => {
-
-        reject(
-          new Error(
-            err.message
-          )
-        );
-
-      }
-    );
-
-
-
-    child.on(
-      "close",
-      (code) => {
-
-
-        if (code !== 0) {
-
-          return reject(
-            new Error(
-              error.trim()
-            )
-          );
-
-        }
-
-
-
-        resolve(
-          Buffer.concat(chunks)
-        );
-
-
-      }
-    );
-
-
-  });
-
+interface InvidiousVideoResponse {
+  title: string;
+  adaptiveFormats: InvidiousAdaptiveFormat[];
+  formatStreams: Array<{ url: string; type: string; container: string }>;
 }
 
+/**
+ * Fetches video metadata from the first responding Invidious instance.
+ * Tries each instance in sequence until one succeeds.
+ * @param videoId - YouTube video ID.
+ * @returns Invidious video API response.
+ */
+async function fetchInvidiousVideo(
+  videoId: string
+): Promise<InvidiousVideoResponse> {
+  let lastError: Error = new Error("No Invidious instances available.");
 
-
-
-
-async function getAudioBuffer(
-  url: string
-): Promise<{
-  buffer: Buffer;
-  ext: string;
-}> {
-
-
-  const formats = [
-
-    {
-      format: "bestaudio/best",
-      ext: "webm"
-    },
-
-    {
-      format: "bestaudio*",
-      ext: "webm"
-    },
-
-    {
-      format: "best",
-      ext: "mp4"
-    }
-
-  ];
-
-
-
-  let lastError = "";
-
-
-
-  for (const item of formats) {
-
+  for (const instance of INVIDIOUS_INSTANCES) {
     try {
-
-
-      console.log(
-        "Trying format:",
-        item.format
+      const response = await axios.get<InvidiousVideoResponse>(
+        `${instance}/api/v1/videos/${videoId}`,
+        { timeout: 15000 }
       );
-
-
-      const buffer =
-        await downloadAudio(
-          url,
-          item.format
-        );
-
-
-      if (buffer.length > 0) {
-
-        return {
-          buffer,
-          ext: item.ext
-        };
-
-      }
-
-
+      return response.data;
     } catch (err: any) {
-
-
-      console.log(
-        "Format failed:",
-        item.format,
-        err.message
+      lastError = new Error(
+        `${instance} failed: ${err.message}`
       );
-
-
-      lastError = err.message;
-
     }
-
   }
 
-
-
-  throw new Error(
-    lastError ||
-    "All audio formats failed"
-  );
-
+  throw lastError;
 }
 
+/**
+ * Picks the best audio-only URL from Invidious adaptiveFormats.
+ * Prefers opus/webm, falls back to any audio format, then formatStreams.
+ * @param data - Invidious video API response.
+ * @returns Direct audio URL and container extension.
+ */
+function pickAudioFormat(data: InvidiousVideoResponse): {
+  url: string;
+  ext: string;
+} {
+  const audioFormats = data.adaptiveFormats.filter(
+    (f) => f.type.startsWith("audio/") && f.url
+  );
+
+  if (audioFormats.length > 0) {
+    /** Sort by bitrate descending to get best quality */
+    audioFormats.sort(
+      (a, b) => parseInt(b.bitrate) - parseInt(a.bitrate)
+    );
+
+    const best = audioFormats[0];
+    const ext = best.container ?? (best.type.includes("webm") ? "webm" : "m4a");
+    return { url: best.url, ext };
+  }
+
+  /** Fallback to formatStreams (muxed video+audio) */
+  if (data.formatStreams.length > 0) {
+    const stream = data.formatStreams[0];
+    return { url: stream.url, ext: stream.container ?? "mp4" };
+  }
+
+  throw new Error(
+    "No downloadable audio format found for this video."
+  );
+}
+
+/**
+ * Downloads audio from a direct URL into a Buffer.
+ * @param url - Direct audio stream URL.
+ * @returns Buffer containing the audio data.
+ */
+async function downloadToBuffer(url: string): Promise<Buffer> {
+  const response = await axios.get(url, {
+    responseType: "arraybuffer",
+    timeout: 120000,
+    maxContentLength: Infinity,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+  });
+  return Buffer.from(response.data);
+}
+
+/**
+ * Uploads a file buffer to Top4Top file hosting service.
+ * @param buffer - File content stored in a Buffer.
+ * @param filename - Name of the file including extension.
+ * @param contentType - MIME type of the file.
+ * @returns Direct download URL from Top4Top.
+ */
 async function uploadTop4Top(
   buffer: Buffer,
   filename: string,
   contentType: string = "application/octet-stream"
 ): Promise<string> {
-
-
   const userAgent =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-    "AppleWebKit/537.36 Chrome/124 Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+  const initResponse = await axios.get("https://top4top.io/", {
+    headers: { "User-Agent": userAgent },
+    timeout: 30000,
+  });
 
+  const initHtml: string = initResponse.data;
+  const cookies = initResponse.headers["set-cookie"];
+  const cookieHeader = cookies
+    ? cookies.map((c: string) => c.split(";")[0]).join("; ")
+    : "";
 
-  const initResponse =
-    await axios.get(
-      "https://top4top.io/",
-      {
-        headers: {
-          "User-Agent": userAgent,
-        },
-        timeout: 30000,
-      }
-    );
-
-
-
-  const html: string =
-    initResponse.data;
-
-
-
-  const cookies =
-    initResponse.headers["set-cookie"];
-
-
-
-  const cookieHeader =
-    cookies
-      ? cookies
-          .map((c: string) => c.split(";")[0])
-          .join("; ")
-      : "";
-
-
-
-  const sid =
-    html.match(
-      /name="sid"\s+value="([^"]+)"/
-    )?.[1];
-
-
-
+  const sid = initHtml.match(/name="sid"\s+value="([^"]+)"/)?.[1];
   if (!sid) {
-
-    throw new Error(
-      "Top4Top session ID not found"
-    );
-
+    throw new Error("Unable to retrieve session ID from Top4Top.");
   }
-
-
 
   const form = new FormData();
+  form.append("sid", sid);
+  form.append("submitr", "[ رفع الملفات ]");
+  form.append("file_0_", buffer, { filename, contentType });
 
-
-
-  form.append(
-    "sid",
-    sid
-  );
-
-
-  form.append(
-    "submitr",
-    "[ رفع الملفات ]"
-  );
-
-
-
-  form.append(
-    "file_0_",
-    buffer,
+  const uploadResponse = await axios.post(
+    "https://top4top.io/index.php",
+    form.getBuffer(),
     {
-      filename,
-      contentType,
+      headers: {
+        ...form.getHeaders(),
+        "User-Agent": userAgent,
+        Cookie: cookieHeader,
+        Referer: "https://top4top.io/",
+        Origin: "https://top4top.io",
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      timeout: 120000,
     }
   );
 
-
-
-  const response =
-    await axios.post(
-      "https://top4top.io/index.php",
-      form.getBuffer(),
-      {
-        headers: {
-
-          ...form.getHeaders(),
-
-          "User-Agent":
-            userAgent,
-
-          "Cookie":
-            cookieHeader,
-
-          "Referer":
-            "https://top4top.io/",
-
-        },
-
-
-        maxContentLength:
-          Infinity,
-
-        maxBodyLength:
-          Infinity,
-
-        timeout:
-          120000,
-
-      }
-    );
-
-
-
-  const result =
-    response.data;
-
-
+  const html: string = uploadResponse.data;
 
   const patterns = [
-
     /value="(https:\/\/[a-z0-9]+\.top4top\.io\/m_[^"]+)"/i,
-
     /value="(https:\/\/[a-z0-9]+\.top4top\.io\/p_[^"]+)"/i,
-
     /(https:\/\/[a-z0-9]+\.top4top\.io\/m_[a-zA-Z0-9_\-.]+)/i,
-
     /(https:\/\/[a-z0-9]+\.top4top\.io\/p_[a-zA-Z0-9_\-.]+)/i,
-
   ];
 
-
-
   for (const regex of patterns) {
-
-    const match =
-      result.match(regex);
-
-
-    if (match) {
-
-      return (
-        match[1] ||
-        match[0]
-      );
-
-    }
-
+    const match = html.match(regex);
+    if (match) return match[1] || match[0];
   }
 
-
-
-  throw new Error(
-    "Top4Top upload URL not found"
-  );
-
+  throw new Error("Top4Top failed to return a valid upload URL.");
 }
 
-
-
-
-
-app.get(
-  "/",
-  (_req: Request, res: Response) => {
-
-    res.render(
-      "index",
-      {
-        title: "Home",
-        activePath: "/"
-      }
-    );
-
-  }
-);
-
-function debugFormats(url: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = runYtDlp([
-      "-F",
-      url
-    ]);
-
-    let output = "";
-    let error = "";
-
-    child.stdout.on("data", (d) => {
-      output += d.toString();
-    });
-
-    child.stderr.on("data", (d) => {
-      error += d.toString();
-    });
-
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(error));
-        return;
-      }
-
-      resolve(output);
-    });
-  });
-}
-
-
-
-app.get(
-  "/boombox",
-  (_req: Request, res: Response) => {
-
-    res.render(
-      "boombox",
-      {
-        title:
-          "Boombox Converter",
-        activePath:
-          "/boombox"
-      }
-    );
-
-  }
-);
-
-
-
-
-
-app.get(
-  "/api/debug-cookies",
-  (_req, res) => {
-
-    const cookie =
-      getCookiesPath();
-
-
-
-    if (!cookie) {
-
-      return res.json({
-        status:
-          "COOKIE_NOT_FOUND"
-      });
-
-    }
-
-
-
-    return res.json({
-
-      status:
-        "OK",
-
-      path:
-        cookie,
-
-      size:
-        fs.statSync(cookie).size
-
-    });
-
-  }
-);
-
-
-
-
-
-app.post(
-  "/api/ytdl",
-  async (
-    req: Request,
-    res: Response
-  ) => {
-
-
-    try {
-
-
-      const {
-        url
-      } = req.body;
-
-
-
-      if (!url) {
-
-        return res.status(400)
-          .json({
-            error:
-              "URL required"
-          });
-
-      }
-
-
-
-      const id =
-        extractVideoId(url);
-
-
-
-      if (!id) {
-
-        return res.status(400)
-          .json({
-            error:
-              "Invalid YouTube URL"
-          });
-
-      }
-
-
-
-      const youtubeUrl =
-        `https://youtube.com/watch?v=${id}`;
-
-
-
-      const info =
-        await getYoutubeInfo(
-          youtubeUrl
-        );
-
-const formats = await debugFormats(youtubeUrl);
-
-console.log(formats);
-
-return res.json({
-  formats
+/** Render Index */
+app.get("/", (_req: Request, res: Response) => {
+  res.render("index", { title: "Home", activePath: "/" });
 });
 
-      const audio =
-        await getAudioBuffer(
-          youtubeUrl
-        );
+/** Render Boombox */
+app.get("/boombox", (_req: Request, res: Response) => {
+  res.render("boombox", { title: "Boombox Converter", activePath: "/boombox" });
+});
 
+/**
+ * Fetches audio via Invidious API, downloads it, then re-uploads to Top4Top.
+ */
+app.post("/api/ytdl", async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
 
-
-      const safeTitle =
-        (
-          info.title ||
-          "audio"
-        )
-        .replace(
-          /[^a-zA-Z0-9]/g,
-          "_"
-        );
-
-
-
-      const filename =
-        `${safeTitle}.${audio.ext}`;
-
-
-
-      const uploaded =
-        await uploadTop4Top(
-          audio.buffer,
-          filename
-        );
-
-
-
-      return res.json({
-
-        title:
-          info.title,
-
-        url:
-          uploaded
-
-      });
-
-
-
-    } catch (err: any) {
-
-
-      console.error(
-        "YTDL ERROR:",
-        err
-      );
-
-
-
-      return res.status(500)
-        .json({
-
-          error:
-            err.message ||
-            "Processing failed"
-
-        });
-
-
+    if (!url) {
+      return res.status(400).json({ error: "URL parameter is required." });
     }
 
+    const id = extractVideoId(url);
+    if (!id) {
+      return res.status(400).json({ error: "Invalid YouTube URL format." });
+    }
 
+    const data = await fetchInvidiousVideo(id);
+    const { url: audioUrl, ext } = pickAudioFormat(data);
+
+    const buffer = await downloadToBuffer(audioUrl);
+    const filename =
+      (data.title || "audio").replace(/[^a-zA-Z0-9]/g, "_") + "." + ext;
+
+    const mimeType =
+      ext === "webm" ? "audio/webm" :
+      ext === "m4a"  ? "audio/mp4"  :
+      ext === "mp4"  ? "video/mp4"  : "application/octet-stream";
+
+    const uploaded = await uploadTop4Top(buffer, filename, mimeType);
+
+    return res.json({ title: data.title, url: uploaded });
+  } catch (err: any) {
+    return res.status(500).json({
+      error: err?.message || "An unexpected error occurred.",
+    });
   }
-);
+});
 
-
-
-
-
+/**
+ * Uploads a local MP3/audio file directly to Top4Top.
+ */
 app.post(
   "/api/upload",
   upload.single("file"),
-  async (
-    req: Request,
-    res: Response
-  ) => {
-
-
+  async (req: Request, res: Response) => {
     try {
-
-
       if (!req.file) {
-
-        return res.status(400)
-          .json({
-            error:
-              "No file"
-          });
-
+        return res.status(400).json({ error: "No file provided." });
       }
 
+      const url = await uploadTop4Top(
+        req.file.buffer,
+        req.file.originalname,
+        req.file.mimetype
+      );
 
-
-      const url =
-        await uploadTop4Top(
-          req.file.buffer,
-          req.file.originalname,
-          req.file.mimetype
-        );
-
-
-
-      return res.json({
-
-        title:
-          req.file.originalname,
-
-        url
-
+      return res.json({ title: req.file.originalname, url });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: err?.message || "Upload failed.",
       });
-
-
-
-    } catch(err: any) {
-
-
-      return res.status(500)
-        .json({
-
-          error:
-            err.message
-
-        });
-
-
     }
-
   }
 );
-
-
-app.get("/api/version", async (_req,res)=>{
-
- const child = runYtDlp([
-   "--version"
- ]);
-
- let out="";
-
- child.stdout.on("data",d=>{
-   out+=d.toString();
- });
-
- child.on("close",()=>{
-   res.json({
-     version:out
-   });
- });
-
-});
-
-app.get("/api/formats", async (_req,res)=>{
-
- const child = runYtDlp([
-   "-F",
-   "https://youtu.be/ltzYprV091c"
- ]);
-
- let out="";
- let err="";
-
- child.stdout.on("data",d=>{
-   out += d.toString();
- });
-
- child.stderr.on("data",d=>{
-   err += d.toString();
- });
-
- child.on("close",()=>{
-   res.json({
-     stdout: out,
-     stderr: err
-   });
- });
-
-});
-
 
 export default app;
